@@ -5,36 +5,31 @@ org 100h
 ; CONSTANTS  (screen pixel coords; BMP row-0 = top of screen as code writes it)
 ; =============================================================================
 
-; LOGIN1 input strip: solid yellow rows y=291-323, x=174-465
-L1_BOX_CLR  equ 291          ; first row to clear
-L1_BOX_H    equ 33           ; rows to clear (291..323 inclusive)
-L1_BOX_X    equ 174          ; left edge of strip
-L1_BOX_W    equ 292          ; 465-174+1
-L1_FILL     equ 16           ; palette index: (255,243,156) yellow
-L1_TEXT_X   equ 179          ; text draw start x (5px inside left edge)
-L1_TEXT_Y   equ 303          ; vertically centred  (291 + (33-8)/2 = 303)
+L1_BOX_CLR  equ 291          
+L1_BOX_H    equ 33           
+L1_BOX_X    equ 174          
+L1_BOX_W    equ 292          
+L1_FILL     equ 16           
+L1_TEXT_X   equ 179          
+L1_TEXT_Y   equ 303          
 
-; LOGIN2 player-1 yellow: exact coords derived from BMP palette scan
-; BMP is bottom-up: PIL y=162-191 -> screen y=288-317
-L2_P1_BOX_CLR  equ 288          ; screen y start (479-191=288)
-L2_P1_BOX_H    equ 30           ; 288..317 inclusive
-L2_P1_BOX_X    equ 136          ; left edge (confirmed from BMP)
-L2_P1_BOX_W    equ 169          ; 304-136+1
-L2_P1_FILL     equ 19           ; palette index: (255,243,156) yellow
-L2_P1_TEXT_X   equ 141          ; 5px inside left edge
-L2_P1_TEXT_Y   equ 299          ; 288 + (30-8)/2 = 299
+L2_P1_BOX_CLR  equ 288          
+L2_P1_BOX_H    equ 30           
+L2_P1_BOX_X    equ 136          
+L2_P1_BOX_W    equ 169          
+L2_P1_FILL     equ 19           
+L2_P1_TEXT_X   equ 141          
+L2_P1_TEXT_Y   equ 299          
 
-; LOGIN2 player-2 blue: exact coords derived from BMP palette scan
-; BMP is bottom-up: PIL y=162-191 -> screen y=288-317
 L2_P2_BOX_CLR  equ 288
 L2_P2_BOX_H    equ 30
-L2_P2_BOX_X    equ 336          ; left edge (confirmed from BMP)
-L2_P2_BOX_W    equ 169          ; 504-336+1
-L2_P2_FILL     equ 15           ; palette index: (229,252,255) light blue
-L2_P2_TEXT_X   equ 341          ; 5px inside left edge
+L2_P2_BOX_X    equ 336          
+L2_P2_BOX_W    equ 169          
+L2_P2_FILL     equ 15           
+L2_P2_TEXT_X   equ 341          
 L2_P2_TEXT_Y   equ 299
 
-TEXT_COLOR  equ 241           ; (103,63,21) dark brown - correct index from palette
+TEXT_COLOR  equ 241           
 MAX_NAME    equ 32
 
 ; =============================================================================
@@ -42,11 +37,14 @@ section .text
 start:
     push cs
     pop ds
+    call setup_sound
+    mov byte [post_game_flag], 0 ; Reset post-game flag on home screen
     call set_vesa_640x480
     push cs
     pop ds
     mov dx, file_welcome
     call load_bmp_640x480
+    call play_welcome            ; Start WELCOME music
 
 wait_welcome:
     mov ah, 01h
@@ -70,6 +68,7 @@ wait_welcome:
 show_gamemode:
     push cs
     pop ds
+    call play_welcome
     mov dx, file_gamemode
     call load_bmp_640x480
 
@@ -93,7 +92,6 @@ show_login1:
     mov dx, file_login1
     call load_bmp_640x480
 
-    ; clear name buffer (es must equal ds for stosb in .COM)
     push cs
     pop es
     mov di, player1_name
@@ -104,33 +102,29 @@ show_login1:
 
 wait_login1:
     mov ah, 00h
-    int 16h                   ; AL = ASCII, AH = scan code
+    int 16h                   
 
     cmp al, 27
     je  show_gamemode
     cmp al, 13
     je  login1_done
 
-    ; Backspace: check AL=8 (ASCII) OR AH=0Eh (scan code 14)
     cmp al, 8
     je  login1_bs
     cmp ah, 0Eh
     je  login1_bs
 
-    ; printable?
     cmp al, 32
     jb  wait_login1
     cmp byte [p1_len], MAX_NAME
     jae wait_login1
 
-    ; convert lowercase to uppercase before storing
     cmp al, 'a'
     jb  .l1_store
     cmp al, 'z'
     ja  .l1_store
-    sub al, 32              ; to uppercase
+    sub al, 32              
 .l1_store:
-    ; store typed character at player1_name[p1_len]
     mov bl, [p1_len]
     xor bh, bh
     mov [player1_name + bx], al
@@ -149,15 +143,12 @@ login1_bs:
     jmp wait_login1
 
 login1_done:
-    cmp byte [p1_len], 0     ; require at least 1 character
+    cmp byte [p1_len], 0     
     je  wait_login1
-    mov byte [game_mode], 1  ; single player
-    call save_names          ; persist names to NAMES.DAT
+    mov byte [game_mode], 1  
+    call save_names          
     jmp show_difficulty
 
-; -- redraw LOGIN1 input box --------------------------------------------------
-; Clears the strip then redraws every char + cursor.
-; Preserves all registers.
 redraw_login1:
     push ax
     push bx
@@ -166,7 +157,6 @@ redraw_login1:
     push si
     push di
 
-    ; 1) clear the strip
     mov dx, L1_BOX_CLR
     mov cx, L1_BOX_H
 .cl1:
@@ -181,7 +171,6 @@ redraw_login1:
     inc dx
     loop .cl1
 
-    ; 2) draw characters
     mov si, player1_name
     mov bx, L1_TEXT_X
     mov dx, L1_TEXT_Y
@@ -189,12 +178,11 @@ redraw_login1:
     mov al, [si]
     or  al, al
     jz  .dr1_done
-    call draw_char      ; draws glyph, advances bx by 8
+    call draw_char      
     inc si
     jmp .dr1
 .dr1_done:
 
-    ; 3) draw cursor (2-px wide vertical bar)
     mov al, TEXT_COLOR
     mov cx, 2
 .cur1_col:
@@ -202,7 +190,7 @@ redraw_login1:
     mov di, L1_TEXT_Y
     mov cx, 8
 .cur1_px:
-    call plot_pixel     ; (bx, di, al)
+    call plot_pixel     
     inc di
     loop .cur1_px
     inc bx
@@ -219,7 +207,6 @@ redraw_login1:
 
 ; =============================================================================
 ; LOGIN 2  -  two-player name entry
-; active_field: 0 = player1, 1 = player2
 ; =============================================================================
 show_login2:
     push cs
@@ -227,15 +214,13 @@ show_login2:
     mov dx, file_login2
     call load_bmp_640x480
 
-    ; initialize mouse driver
     mov ax, 0000h
-    int 33h                 ; reset mouse, AX=FFFFh if driver present
-    ; set mouse position range to match 640x480 screen
-    mov ax, 0007h           ; set horizontal range
+    int 33h                 
+    mov ax, 0007h           
     mov cx, 0
     mov dx, 639
     int 33h
-    mov ax, 0008h           ; set vertical range
+    mov ax, 0008h           
     mov cx, 0
     mov dx, 479
     int 33h
@@ -255,15 +240,11 @@ show_login2:
     mov byte [active_field], 0
 
 wait_login2:
-    ; --- check mouse button (INT 33h AX=0003h) ---
-    ; Returns: BX=button state (bit0=left), CX=x, DX=y
     mov ax, 0003h
     int 33h
-    test bx, 1              ; left button pressed?
+    test bx, 1              
     jz  .no_click
 
-    ; left button is down - check which box was clicked
-    ; P1 box: x=136-304, y=288-317
     cmp cx, 136
     jb  .no_click
     cmp cx, 304
@@ -272,10 +253,8 @@ wait_login2:
     jb  .no_click
     cmp dx, 317
     ja  .no_click
-    ; clicked inside P1 box
     mov byte [active_field], 0
     call redraw_login2
-    ; wait for button release to avoid repeat
 .wait_release1:
     mov ax, 0003h
     int 33h
@@ -284,7 +263,6 @@ wait_login2:
     jmp wait_login2
 
 .check_p2_click:
-    ; P2 box: x=336-504, y=288-317
     cmp cx, 336
     jb  .no_click
     cmp cx, 504
@@ -293,10 +271,8 @@ wait_login2:
     jb  .no_click
     cmp dx, 317
     ja  .no_click
-    ; clicked inside P2 box
     mov byte [active_field], 1
     call redraw_login2
-    ; wait for button release
 .wait_release2:
     mov ax, 0003h
     int 33h
@@ -305,12 +281,10 @@ wait_login2:
     jmp wait_login2
 
 .no_click:
-    ; --- check keyboard (non-blocking: AH=01h tests if key waiting) ---
     mov ah, 01h
     int 16h
-    jz  wait_login2         ; no key ready, loop back to check mouse
+    jz  wait_login2         
 
-    ; key is ready - consume it
     mov ah, 00h
     int 16h
 
@@ -328,7 +302,6 @@ wait_login2:
     cmp al, 32
     jb  wait_login2
 
-    ; convert lowercase to uppercase
     cmp al, 'a'
     jb  .l2_store
     cmp al, 'z'
@@ -338,7 +311,6 @@ wait_login2:
     cmp byte [active_field], 0
     je  login2_add_p1
 
-    ; add to player2
     cmp byte [p2_len], MAX_NAME
     jae wait_login2
     mov bl, [p2_len]
@@ -397,14 +369,13 @@ login2_enter_p2:
     je  wait_login2
     cmp byte [p2_len], 0
     je  wait_login2
-    mov byte [game_mode], 2  ; two player
-    mov byte [current_player], 0  ; always start with Player 1
+    mov byte [game_mode], 2  
+    mov byte [current_player], 0  
     mov word [p1_score], 0
     mov word [p2_score], 0
-    call save_names          ; persist names to NAMES.DAT
+    call save_names          
     jmp show_difficulty
 
-; -- redraw LOGIN2 both input boxes -------------------------------------------
 redraw_login2:
     push ax
     push bx
@@ -413,7 +384,6 @@ redraw_login2:
     push si
     push di
 
-    ; clear + draw player-1 yellow box
     mov dx, L2_P1_BOX_CLR
     mov cx, L2_P1_BOX_H
 .cl2p1:
@@ -439,7 +409,6 @@ redraw_login2:
     inc si
     jmp .drp1
 .drp1_done:
-    ; cursor on p1 if active
     cmp byte [active_field], 0
     jne .no_cur_p1
     mov al, TEXT_COLOR
@@ -457,7 +426,6 @@ redraw_login2:
     loop .cur2p1
 .no_cur_p1:
 
-    ; clear + draw player-2 blue box
     mov dx, L2_P2_BOX_CLR
     mov cx, L2_P2_BOX_H
 .cl2p2:
@@ -483,7 +451,6 @@ redraw_login2:
     inc si
     jmp .drp2
 .drp2_done:
-    ; cursor on p2 if active
     cmp byte [active_field], 1
     jne .no_cur_p2
     mov al, TEXT_COLOR
@@ -510,11 +477,12 @@ redraw_login2:
     ret
 
 ; =============================================================================
-; DIFFICULTY SELECT  -  shown after login (both modes)
+; DIFFICULTY SELECT
 ; =============================================================================
 show_difficulty:
     push cs
     pop ds
+    call play_welcome
     mov dx, file_letsplay
     call load_bmp_640x480
 
@@ -528,7 +496,7 @@ wait_difficulty:
     cmp al, '3'
     je  diff_big
     cmp al, 27
-    je  show_gamemode        ; ESC goes back to mode select
+    je  show_gamemode        
     jmp wait_difficulty
 
 diff_baby:
@@ -544,7 +512,7 @@ diff_big:
     jmp show_howtoplay
 
 ; =============================================================================
-; HOW TO PLAY  -  shown after difficulty is selected
+; HOW TO PLAY
 ; =============================================================================
 show_howtoplay:
     push cs
@@ -556,13 +524,13 @@ wait_howtoplay:
     mov ah, 00h
     int 16h
     cmp al, 27
-    je  show_difficulty      ; ESC goes back to difficulty select
+    je  show_difficulty      
     cmp al, 13
-    je  show_intro           ; Enter goes to intro page
+    je  show_intro           
     jmp wait_howtoplay
 
 ; =============================================================================
-; INTRO PAGE  -  shown after how to play
+; INTRO PAGE
 ; =============================================================================
 show_intro:
     push cs
@@ -574,50 +542,36 @@ wait_intro:
     mov ah, 00h
     int 16h
     cmp al, 27
-    je  show_howtoplay       ; ESC goes back to how to play
+    je  show_howtoplay       
     cmp al, 13
-    je  start_game           ; Enter proceeds to game
+    je  start_game           
     jmp wait_intro
 
 ; =============================================================================
-; GAME ENGINE  -  Easy mode (Baby Bee): 3 questions, 5 hearts, 2 choices
-; HUD strip: screen y=0-59 (cyan background drawn by BMP)
-; Hearts drawn at y=20, Score at y=20 right side, Q# counter middle
+; GAME ENGINE  -  Easy mode
 ; =============================================================================
-
-; Heart colors (palette indices in 256-color mode)
-; We use fill_hline to draw solid blocks for hearts
-; Red = alive heart, colour 4 (standard VGA red in most palettes)
-; Grey = lost heart, colour 8
-
-HEART_X1    equ 15          ; x of first heart left edge
-HEART_GAP   equ 24          ; spacing between hearts (px)
-HEART_SIZE  equ 16          ; width and height of each heart block
-HEART_Y     equ 20          ; y of heart row
-SCORE_X     equ 490         ; x of score display
-SCORE_Y     equ 20          ; y of score
-QN_X        equ 290         ; x of Q counter
-QN_Y        equ 20          ; y of Q counter
-HUD_CLR     equ 60          ; height of HUD rows to clear (screen y 0-59)
+HEART_X1    equ 15          
+HEART_GAP   equ 24          
+HEART_SIZE  equ 16          
+HEART_Y     equ 20          
+SCORE_X     equ 490         
+SCORE_Y     equ 20          
+QN_X        equ 290         
+QN_Y        equ 20          
+HUD_CLR     equ 60          
 
 MAX_HEARTS  equ 5
-TOTAL_Q_E   equ 5           ; Easy = 5 questions
-
-; question correct answers: 1=press1, 2=press2
-; Q_CI_M: circle   -> answer=2
-; Q_TR_M: triangle -> answer=2
-; Q_ST_M: star     -> answer=1
+TOTAL_Q_E   equ 5           
 
 start_game:
     push cs
     pop  ds
-    ; branch on difficulty: 2 = Young Bee (medium), 3 = Big Bee (hard)
+    call play_playing            ; Switch to PLAYING.IMF
     cmp  byte [difficulty], 2
     je   start_game_med
     cmp  byte [difficulty], 3
     je   start_game_hard
 
-    ; ---- Easy / Baby Bee ----
     mov  byte [cur_max_hearts], MAX_HEARTS
     mov  byte [cur_total_q],    TOTAL_Q_E
     mov  word [cur_bmp_table],  q_bmp_table
@@ -627,12 +581,10 @@ start_game:
     mov  byte [q_num],          0
     mov  byte [correct_count],  0
 
-    ; --- 2P: show player-ready splash before starting ---
     cmp  byte [game_mode], 2
     jne  game_loop
     cmp  byte [current_player], 0
     je   .sg_show_p1
-    ; Player 2's turn
     push cs
     pop  ds
     mov  dx, file_2p_p2ready
@@ -662,7 +614,6 @@ game_loop:
     jmp  game_finish
 
 .gl_load:
-    ; load question BMP (table pointer set by start_game variant)
     xor  bx, bx
     mov  bl, [q_num]
     shl  bx, 1
@@ -670,11 +621,7 @@ game_loop:
     mov  dx, [si + bx]
     call load_bmp_640x480
 
-    ; force palette slots 4=red, 15=light grey into VGA DAC
-    ; so hearts are always visible regardless of BMP palette
     call set_heart_colors
-
-    ; overlay HUD
     call draw_hud
 
 wait_answer:
@@ -734,7 +681,7 @@ wait_answer:
     inc  byte [correct_count]
     add  word [game_score], 10
     inc  byte [q_num]
-    call draw_hud            ; update score on screen immediately
+    call draw_hud            
     jmp  game_loop
 
 .do_wrong:
@@ -742,11 +689,11 @@ wait_answer:
     pop  ds
     dec  byte [hearts]
     inc  byte [q_num]
-    call draw_hud            ; show lost heart immediately
+    call draw_hud            
     jmp  game_loop
 
 ; =============================================================================
-; GAME ENGINE  -  Medium mode (Young Bee): 5 questions, 5 hearts, 2 choices
+; GAME ENGINE  -  Medium mode 
 ; =============================================================================
 MAX_HEARTS_MED  equ 5
 TOTAL_Q_MED     equ 5
@@ -754,6 +701,7 @@ TOTAL_Q_MED     equ 5
 start_game_med:
     push cs
     pop  ds
+    call play_playing            ; Switch to PLAYING.IMF
     mov  byte [cur_max_hearts], MAX_HEARTS_MED
     mov  byte [cur_total_q],    TOTAL_Q_MED
     mov  word [cur_bmp_table],  q_bmp_table_med
@@ -763,7 +711,6 @@ start_game_med:
     mov  byte [q_num],          0
     mov  byte [correct_count],  0
 
-    ; --- 2P: show player-ready splash before starting ---
     cmp  byte [game_mode], 2
     jne  game_loop
     cmp  byte [current_player], 0
@@ -783,7 +730,7 @@ start_game_med:
     jmp  game_loop
 
 ; =============================================================================
-; GAME ENGINE  -  Hard mode (Big Bee): 5 questions, 3 hearts, 4 choices
+; GAME ENGINE  -  Hard mode
 ; =============================================================================
 MAX_HEARTS_HARD equ 5
 TOTAL_Q_HARD    equ 5
@@ -791,6 +738,7 @@ TOTAL_Q_HARD    equ 5
 start_game_hard:
     push cs
     pop  ds
+    call play_playing            ; Switch to PLAYING.IMF
     mov  byte [cur_max_hearts], MAX_HEARTS_HARD
     mov  byte [cur_total_q],    TOTAL_Q_HARD
     mov  word [cur_bmp_table],  q_bmp_table_hard
@@ -800,7 +748,6 @@ start_game_hard:
     mov  byte [q_num],          0
     mov  byte [correct_count],  0
 
-    ; --- 2P: show player-ready splash before starting ---
     cmp  byte [game_mode], 2
     jne  game_loop
     cmp  byte [current_player], 0
@@ -820,28 +767,24 @@ start_game_hard:
     jmp  game_loop
 
 ; ---------------------------------------------------------------------------
-; ---------------------------------------------------------------------------
 game_finish:
     push cs
     pop  ds
 
-    ; --- 2P mode: handle turn handoff or winner reveal ---
     cmp  byte [game_mode], 2
     jne  .gf_single
 
     cmp  byte [current_player], 0
     jne  .gf_p2_done
 
-    ; --- P1 just finished: save results, start P2's turn ---
     mov  ax, [game_score]
     mov  [p1_score], ax
     mov  al, [correct_count]
     mov  [p1_correct], al
     mov  byte [current_player], 1
-    jmp  start_game           ; replay same difficulty for P2
+    jmp  start_game           
 
 .gf_p2_done:
-    ; --- P2 just finished: save P2 results, show winner ---
     mov  ax, [game_score]
     mov  [p2_score], ax
     mov  al, [correct_count]
@@ -850,12 +793,13 @@ game_finish:
     jmp  show_2p_winner
 
 .gf_single:
-    ; --- single-player finish (original logic) ---
     mov  al, [correct_count]
     mov  bl, 100
     mul  bl
     mov  bl, [cur_total_q]
-    div  bl                  ; al = percent correct
+    div  bl                  
+
+    mov byte [post_game_flag], 1 ; Flag that we came from an active game
 
     cmp  al, 100
     je   .gf_perfect
@@ -884,23 +828,20 @@ game_over_screen:
     push cs
     pop  ds
 
-    ; --- 2P mode: game-over mid-turn ---
     cmp  byte [game_mode], 2
     jne  .go_single
 
     cmp  byte [current_player], 0
     jne  .go_p2_done
 
-    ; P1 ran out of hearts: score is whatever they earned, hand to P2
     mov  ax, [game_score]
     mov  [p1_score], ax
     mov  al, [correct_count]
     mov  [p1_correct], al
     mov  byte [current_player], 1
-    jmp  start_game           ; P2 plays same round
+    jmp  start_game           
 
 .go_p2_done:
-    ; P2 ran out of hearts: finalize and show winner
     mov  ax, [game_score]
     mov  [p2_score], ax
     mov  al, [correct_count]
@@ -909,6 +850,7 @@ game_over_screen:
     jmp  show_2p_winner
 
 .go_single:
+    mov byte [post_game_flag], 1 ; Flag that we came from an active game
     mov  dx, file_tryagain
     call load_bmp_640x480
     call save_score
@@ -916,12 +858,10 @@ game_over_screen:
     jmp  show_leaderboard
 
 ; ---------------------------------------------------------------------------
-; show_2p_winner  -  compare P1 vs P2 scores and show result
-; ---------------------------------------------------------------------------
 show_2p_winner:
     push cs
     pop  ds
-    ; reset current_player for next game
+    mov byte [post_game_flag], 1 ; Flag that we came from an active game
     mov  byte [current_player], 0
 
     mov  ax, [p1_score]
@@ -929,7 +869,6 @@ show_2p_winner:
     cmp  ax, bx
     ja   .w_p1wins
     jb   .w_p2wins
-    ; draw
     mov  dx, file_2p_draw
     jmp  .w_show
 .w_p1wins:
@@ -940,8 +879,6 @@ show_2p_winner:
 .w_show:
     call load_bmp_640x480
 
-    ; draw both scores on screen
-    ; P1 score label at (60, 300)
     push cs
     pop  ds
     mov  bx, 60
@@ -955,7 +892,6 @@ show_2p_winner:
     mov  ax, [p1_score]
     call draw_num_ax
 
-    ; P2 score label at (360, 300)
     mov  bx, 360
     mov  dx, 300
     mov  al, 'P'
@@ -980,9 +916,6 @@ wait_2p_winner:
     jmp  wait_2p_winner
 
 ; ---------------------------------------------------------------------------
-; save_score_2p  -  save both players' scores for 2P mode
-; Writes two records: one for P1, one for P2
-; ---------------------------------------------------------------------------
 save_score_2p:
     push ax
     push bx
@@ -993,14 +926,12 @@ save_score_2p:
     push cs
     pop  ds
 
-    ; temporarily swap game_score/correct_count to P1 values and save
     mov  ax, [p1_score]
     mov  [game_score], ax
     mov  al, [p1_correct]
     mov  [correct_count], al
     call save_score
 
-    ; now save P2 values
     mov  ax, [p2_score]
     mov  [game_score], ax
     mov  al, [p2_correct]
@@ -1016,17 +947,10 @@ save_score_2p:
     ret
 
 ; ---------------------------------------------------------------------------
-; set_heart_colors  -  force VGA DAC palette entries for HUD hearts + text
-; Index  4 → bright red   (63, 0,  0)  = filled heart
-; Index 15 → light grey   (42, 42, 42) = lost heart
-; Index  0 → pure white   (63, 63, 63) = background clear pixel
-; Index 241 is left as-is (already near-black in question BMPs)
-; ---------------------------------------------------------------------------
 set_heart_colors:
     push ax
     push dx
 
-    ; index 4 = bright red
     mov  dx, 3C8h
     mov  al, 4
     out  dx, al
@@ -1037,7 +961,6 @@ set_heart_colors:
     out  dx, al
     out  dx, al
 
-    ; index 15 = mid grey (lost/empty heart)
     mov  dx, 3C8h
     mov  al, 15
     out  dx, al
@@ -1054,8 +977,6 @@ set_heart_colors:
     ret
 
 ; ---------------------------------------------------------------------------
-; draw_hud  -  draws hearts + score + Q counter over HUD area
-; ---------------------------------------------------------------------------
 draw_hud:
     push ax
     push bx
@@ -1066,26 +987,20 @@ draw_hud:
     push cs
     pop  ds
 
-    ; ── clear HUD strip (rows 0..HUD_CLR-1) with black (index 0) ───────────
-    ; This erases any hearts the BMP pre-drew so only our dynamic count shows.
-    xor  dx, dx          ; start at row 0
+    xor  dx, dx          
 .dh_clr:
     cmp  dx, HUD_CLR
     jae  .dh_clr_done
     push dx
-    mov  bx, 0           ; x start
-    mov  cx, 640         ; full width
-    mov  al, 0           ; colour 0 (black background for HUD)
+    mov  bx, 0           
+    mov  cx, 640         
+    mov  al, 0           
     call fill_hline
     pop  dx
     inc  dx
     jmp  .dh_clr
 .dh_clr_done:
 
-    ; ── draw hearts (count set by cur_max_hearts) ──────────────────────────
-    ; si = heart index
-    ; red (color 4)  if si < [hearts]
-    ; grey (color 15) if si >= [hearts]
     xor  si, si
 
 .dh_next_heart:
@@ -1094,34 +1009,25 @@ draw_hud:
     cmp  si, ax
     jae  .dh_done_hearts
 
-    ; --- compute x into CX (use CX not BX to avoid confusion) ---
-    ; x = HEART_X1 + si * HEART_GAP
-    ; HEART_GAP=24, HEART_X1=15
-    ; si=0 -> x=15,  si=1 -> x=39,  si=2 -> x=63
     mov  cx, si
     mov  ax, HEART_GAP
     push dx
-    mul  cx               ; AX = si * HEART_GAP, DX trashed
+    mul  cx               
     pop  dx
-    add  ax, HEART_X1     ; AX = x position
-    mov  bx, ax           ; BX = x (used by fill_hline and draw routines)
+    add  ax, HEART_X1     
+    mov  bx, ax           
 
-    ; --- pick color ---
-    ; NOTE: ax was clobbered by 'mul cx' above, so reload hearts here.
-    mov  al, [hearts]     ; remaining hearts count
-    cmp  si, ax           ; si >= hearts -> lost heart  (si=heart index, al=count)
+    mov  al, [hearts]     
+    cmp  si, ax           
     jb   .dh_alive
-    mov  al, 15           ; grey (lost heart)
+    mov  al, 15           
     jmp  .dh_drawcolor
 .dh_alive:
-    mov  al, 4            ; red (alive heart)
+    mov  al, 4            
 
 .dh_drawcolor:
-    ; --- draw heart shape ---
-    ; Store color in ah for safe keeping (fill_hline uses al)
     mov  ah, al
 
-    ; Top-left bump: x, HEART_Y, 6 wide x 3 tall
     mov  dx, HEART_Y
     mov  cx, 6
     mov  al, ah
@@ -1135,7 +1041,6 @@ draw_hud:
     mov  al, ah
     call fill_hline
 
-    ; Top-right bump: x+10, HEART_Y, 6 wide x 3 tall
     add  bx, 10
     mov  dx, HEART_Y
     mov  cx, 6
@@ -1149,9 +1054,8 @@ draw_hud:
     mov  cx, 6
     mov  al, ah
     call fill_hline
-    sub  bx, 10           ; restore to left edge
+    sub  bx, 10           
 
-    ; Full body: x-2, HEART_Y+3, 20 wide x 4 tall
     sub  bx, 2
     mov  cx, 20
     mov  dx, HEART_Y+3
@@ -1167,7 +1071,6 @@ draw_hud:
     mov  al, ah
     call fill_hline
 
-    ; Narrow: x+4, HEART_Y+7, 12 wide x 2 tall
     add  bx, 4
     mov  cx, 12
     mov  dx, HEART_Y+7
@@ -1177,27 +1080,23 @@ draw_hud:
     mov  al, ah
     call fill_hline
 
-    ; Tip 1: x+3, HEART_Y+9, 6 wide
     add  bx, 3
     mov  cx, 6
     mov  dx, HEART_Y+9
     mov  al, ah
     call fill_hline
 
-    ; Tip 2: x+2, HEART_Y+10, 2 wide
     add  bx, 2
     mov  cx, 2
     mov  dx, HEART_Y+10
     mov  al, ah
     call fill_hline
 
-    ; next heart
     inc  si
     jmp  .dh_next_heart
 
 .dh_done_hearts:
 
-    ; ── draw score ─────────────────────────────────────────────────────────
     mov  bx, SCORE_X
     mov  dx, SCORE_Y
     mov  al, 'S'
@@ -1209,7 +1108,6 @@ draw_hud:
     mov  ax, [game_score]
     call draw_num_ax
 
-    ; ── draw question counter ───────────────────────────────────────────────
     mov  bx, QN_X
     mov  dx, QN_Y
     mov  al, 'Q'
@@ -1217,7 +1115,7 @@ draw_hud:
     mov  al, ':'
     call draw_char
     mov  al, [q_num]
-    inc  al               ; 1-based
+    inc  al               
     add  al, '0'
     call draw_char
     mov  al, '/'
@@ -1226,7 +1124,6 @@ draw_hud:
     add  al, '0'
     call draw_char
 
-    ; ── 2P: draw current player indicator ──────────────────────────────────
     cmp  byte [game_mode], 2
     jne  .dh_no2p
     mov  bx, 560
@@ -1259,12 +1156,11 @@ draw_num_ax:
     push cx
     push dx
     push si
-    ; build decimal string backwards in num_buf
     push cs
     pop  ds
-    mov  si, num_buf + 5    ; end of buffer
-    mov  byte [si], 0       ; null term
-    mov  cx, 0              ; digit count
+    mov  si, num_buf + 5    
+    mov  byte [si], 0       
+    mov  cx, 0              
     cmp  ax, 0
     jne  .dna_loop
     dec  si
@@ -1276,11 +1172,11 @@ draw_num_ax:
     je   .dna_print
     push bx
     mov  bx, 10
-    push dx                 ; save y-coord before div clobbers dx
+    push dx                 
     xor  dx, dx
     div  bx
-    mov  cl, dl             ; save remainder digit
-    pop  dx                 ; restore y-coord
+    mov  cl, dl             
+    pop  dx                 
     pop  bx
     dec  si
     add  cl, '0'
@@ -1288,7 +1184,6 @@ draw_num_ax:
     inc  cx
     jmp  .dna_loop
 .dna_print:
-    ; si points to first digit
 .dna_out:
     mov  al, [si]
     or   al, al
@@ -1304,8 +1199,6 @@ draw_num_ax:
     ret
 
 ; ---------------------------------------------------------------------------
-; delay_2s  -  waits ~2 seconds using BIOS timer tick (18.2/sec)
-; ---------------------------------------------------------------------------
 delay_2s:
     push ax
     push bx
@@ -1313,8 +1206,7 @@ delay_2s:
     push dx
     mov  ah, 00h
     int  1Ah
-    ; cx:dx = current ticks
-    add  dx, 37             ; 37 ticks ~ 2.03 seconds
+    add  dx, 37             
     adc  cx, 0
     mov  bx, dx
     mov  si, cx
@@ -1334,10 +1226,6 @@ delay_2s:
     ret
 
 ; ---------------------------------------------------------------------------
-; save_score - appends complete record to NAMES.TXT
-; Format: MODE,P1NAME,P2NAME,DIFF,SCORE\r\n
-; Opens (or creates) NAMES.TXT, seeks to end, writes the full line atomically.
-; ---------------------------------------------------------------------------
 save_score:
     push ax
     push bx
@@ -1348,13 +1236,11 @@ save_score:
     push cs
     pop  ds
 
-    ; open for read/write, create if missing
     mov  ah, 3Dh
-    mov  al, 02h             ; read+write
+    mov  al, 02h             
     mov  dx, file_names
     int  21h
     jnc  .ss_seek
-    ; file doesn't exist — create it
     mov  ah, 3Ch
     xor  cx, cx
     mov  dx, file_names
@@ -1362,7 +1248,6 @@ save_score:
     jc   .ss_done
 .ss_seek:
     mov  [filehandle], ax
-    ; seek to end so we always append
     mov  ah, 42h
     mov  al, 02h
     mov  bx, [filehandle]
@@ -1370,17 +1255,14 @@ save_score:
     xor  dx, dx
     int  21h
 
-    ; ── write MODE digit ──────────────────────────────────────────────────
     mov  al, [game_mode]
     add  al, '0'
     mov  [sn_byte], al
     call .ss_wb
 
-    ; ── write comma ───────────────────────────────────────────────────────
     mov  byte [sn_byte], ','
     call .ss_wb
 
-    ; ── write P1 name ─────────────────────────────────────────────────────
     mov  si, player1_name
 .ss_p1:
     mov  al, [si]
@@ -1392,11 +1274,9 @@ save_score:
     jmp  .ss_p1
 .ss_p1done:
 
-    ; ── write comma ───────────────────────────────────────────────────────
     mov  byte [sn_byte], ','
     call .ss_wb
 
-    ; ── write P2 name ─────────────────────────────────────────────────────
     mov  si, player2_name
 .ss_p2:
     mov  al, [si]
@@ -1408,21 +1288,17 @@ save_score:
     jmp  .ss_p2
 .ss_p2done:
 
-    ; ── write comma ───────────────────────────────────────────────────────
     mov  byte [sn_byte], ','
     call .ss_wb
 
-    ; ── write DIFF digit ──────────────────────────────────────────────────
     mov  al, [difficulty]
     add  al, '0'
     mov  [sn_byte], al
     call .ss_wb
 
-    ; ── write comma ───────────────────────────────────────────────────────
     mov  byte [sn_byte], ','
     call .ss_wb
 
-    ; ── write SCORE digits ────────────────────────────────────────────────
     mov  ax, [game_score]
     push cs
     pop  ds
@@ -1457,14 +1333,12 @@ save_score:
     inc  si
     jmp  .ss_wloop
 
-    ; ── write CR LF ───────────────────────────────────────────────────────
 .ss_wcrlf:
     mov  byte [sn_byte], 13
     call .ss_wb
     mov  byte [sn_byte], 10
     call .ss_wb
 
-    ; ── close file ────────────────────────────────────────────────────────
     mov  ah, 3Eh
     mov  bx, [filehandle]
     int  21h
@@ -1478,7 +1352,6 @@ save_score:
     pop  ax
     ret
 
-    ; ── helper: write one byte from [sn_byte] ─────────────────────────────
 .ss_wb:
     push ax
     push cx
@@ -1494,65 +1367,54 @@ save_score:
     ret
 
 ; =============================================================================
-; SAVE NAMES  -  appends one plain-text line to NAMES.TXT
-; Format per line:  MODE,PLAYER1,PLAYER2<CR><LF>
-; Example:          1,Christian,<CR><LF>
-;                   2,Steve,Dale<CR><LF>
-; Easy to read in any text editor and in VIEWREC.
-; =============================================================================
 save_names:
-    ; Record is now written atomically by save_score.
-    ; save_names is kept so existing call sites still assemble.
     ret
 
 ; =============================================================================
 ; LEADERBOARD
-; Reads NAMES.TXT, parses records, draws top-5 per difficulty column.
-; Record format (save_names + save_score):
-;   MODE,P1NAME,P2NAME,DIFF,SCORE\r\n
-;   field 0=MODE  1=P1NAME  2=P2NAME  3=DIFF(1/2/3)  4=SCORE
-;
-; Screen layout (from LEADERBD.BMP):
-;   Baby Bee col x=103  Young Bee col x=263  Big Bee col x=423
-;   Row 1 y=238, step 30px each row
-;
-; Board storage: 3 cols x 5 rows, each entry = 2 bytes score + 10 bytes name = 12 bytes
 ; =============================================================================
 
 LB_ROWS equ 5
 LB_NLEN equ 10
-LB_ESIZ equ 12          ; 2(score word) + 10(name)
+LB_ESIZ equ 12          
 
-LB_X0   equ 103         ; Baby Bee column x
-LB_X1   equ 263         ; Young Bee column x
-LB_X2   equ 423         ; Big Bee column x
-LB_Y0   equ 208         ; first row y (aligned to '1.' label on LEADERBD.BMP)
-LB_YGAP equ 30          ; row spacing
+LB_X0   equ 103         
+LB_X1   equ 263         
+LB_X2   equ 423         
+LB_Y0   equ 208         
+LB_YGAP equ 30          
 
 show_leaderboard:
     push cs
     pop  ds
+    
+    ; Check if we came from an active game or the main menu
+    cmp byte [post_game_flag], 1
+    je .keep_playing_music
+    call play_welcome
+    jmp .music_set
+.keep_playing_music:
+    call play_playing
+.music_set:
+
     mov  dx, file_leaderboard
     call load_bmp_640x480
 
-    ; Fix palette index 241 (TEXT_COLOR) to dark brown so draw_char text is
-    ; visible on the leaderboard BMP (its palette may map 241 to background).
     push ax
     push dx
     mov  dx, 3C8h
     mov  al, 241
     out  dx, al
     mov  dx, 3C9h
-    mov  al, 26          ; R=103 >> 2 = 26  (dark brown: r=103,g=63,b=21)
+    mov  al, 26          
     out  dx, al
-    mov  al, 15          ; G=63  >> 2 = 15
+    mov  al, 15          
     out  dx, al
-    mov  al, 5           ; B=21  >> 2 = 5
+    mov  al, 5           
     out  dx, al
     pop  dx
     pop  ax
 
-    ; ---- zero board buffer ----
     push cs
     pop  ds
     push cs
@@ -1565,29 +1427,24 @@ show_leaderboard:
     mov  byte [lb_used+1], 0
     mov  byte [lb_used+2], 0
 
-    ; ---- open NAMES.TXT ----
     push cs
     pop  ds
     mov  ah, 3Dh
     mov  al, 00h
     mov  dx, file_names
     int  21h
-    jc   .draw              ; no file → show blank board
+    jc   .draw              
 
     mov  [filehandle], ax
 
-    ; ---- parse loop ----
 .rdline:
-    call lb_readline        ; fills lb_rbuf, returns CX=len
+    call lb_readline        
     cmp  cx, 0
     je   .closefile
 
-    ; SI = lb_rbuf  (set by lb_readline)
-    ; skip field 0 (MODE)
     call lb_skipfield
     jc   .rdline
 
-    ; copy field 1 (P1 name) into lb_tmp_name
     push cs
     pop  ds
     mov  di, lb_tmp_name
@@ -1595,11 +1452,9 @@ show_leaderboard:
     call lb_copyfield
     jc   .rdline
 
-    ; skip field 2 (P2 name)
     call lb_skipfield
     jc   .rdline
 
-    ; read field 3: difficulty digit (1, 2, or 3)
     mov  al, [si]
     sub  al, '0'
     cmp  al, 1
@@ -1610,11 +1465,9 @@ show_leaderboard:
     call lb_skipfield
     jc   .rdline
 
-    ; read field 4: score number
-    call lb_parsenum        ; AX = score
+    call lb_parsenum        
     mov  [lb_tmp_score], ax
 
-    ; insert into correct column (sorted, top-5 by score desc)
     call lb_insert
 
     jmp  .rdline
@@ -1624,24 +1477,20 @@ show_leaderboard:
     mov  bx, [filehandle]
     int  21h
 
-    ; ---- draw each column ----
 .draw:
     push cs
     pop  ds
 
-    ; Column 0 (Baby Bee)
     mov  bx, LB_X0
     mov  si, lb_board + 0 * LB_ROWS * LB_ESIZ
     mov  al, [lb_used+0]
     call lb_drawcol
 
-    ; Column 1 (Young Bee)
     mov  bx, LB_X1
     mov  si, lb_board + 1 * LB_ROWS * LB_ESIZ
     mov  al, [lb_used+1]
     call lb_drawcol
 
-    ; Column 2 (Big Bee)
     mov  bx, LB_X2
     mov  si, lb_board + 2 * LB_ROWS * LB_ESIZ
     mov  al, [lb_used+2]
@@ -1651,18 +1500,15 @@ wait_leaderboard:
     mov  ah, 00h
     int  16h
     cmp  al, 27
-    je   ret_home_from_lb   ; ESC -> home
+    je   ret_home_from_lb   
     cmp  al, 13
-    je   ret_home_from_lb   ; Enter -> home
+    je   ret_home_from_lb   
     jmp  wait_leaderboard
 
 ret_home_from_lb:
     jmp  start
 
 ; ---------------------------------------------------------------------------
-; lb_drawcol  -  draw one leaderboard column
-; IN:  BX = column x,  SI = pointer to first entry in column,  AL = count
-; Preserves everything
 lb_drawcol:
     push ax
     push bx
@@ -1674,12 +1520,11 @@ lb_drawcol:
     push cs
     pop  ds
 
-    ; save column x for row resets
     mov  [lb_col_x], bx
 
     xor  ah, ah
-    mov  cx, ax             ; cx = entry count
-    xor  di, di             ; di = row index
+    mov  cx, ax             
+    xor  di, di             
 
 .lcol_loop:
     cmp  di, cx
@@ -1687,7 +1532,6 @@ lb_drawcol:
     cmp  di, LB_ROWS
     jae  .lcol_done
 
-    ; dx = LB_Y0 + di * LB_YGAP
     push ax
     mov  ax, di
     push cx
@@ -1698,13 +1542,10 @@ lb_drawcol:
     mov  dx, ax
     pop  ax
 
-    ; bx = column x (reset each row)
     mov  bx, [lb_col_x]
 
-    ; draw name: up to LB_NLEN chars starting at [si+2]
-    ; si currently points to entry base (score word first, then name)
     push si
-    add  si, 2              ; point past score word to name
+    add  si, 2              
     push cx
     mov  cx, LB_NLEN
 .lcol_name:
@@ -1717,19 +1558,16 @@ lb_drawcol:
     jnz  .lcol_name
 .lcol_name_done:
     pop  cx
-    pop  si                 ; si = entry base again
+    pop  si                 
 
-    ; jump BX to fixed score position: column_x + 8*6 = column_x + 48
     mov  bx, [lb_col_x]
     add  bx, 48
 
-    ; draw score: read word at [si]
     push ax
     mov  ax, [si]
     call draw_num_ax
     pop  ax
 
-    ; advance to next entry
     add  si, LB_ESIZ
     inc  di
     jmp  .lcol_loop
@@ -1745,9 +1583,6 @@ lb_drawcol:
     ret
 
 ; ---------------------------------------------------------------------------
-; lb_insert  -  insert lb_tmp_name/lb_tmp_score/lb_tmp_diff into lb_board
-; Keeps top-5 per column sorted by score descending.
-; Uses: AX BX CX DX SI DI  (all saved/restored)
 lb_insert:
     push ax
     push bx
@@ -1759,82 +1594,68 @@ lb_insert:
     push cs
     pop  ds
 
-    ; BX = column index (0-based)
     xor  bh, bh
     mov  bl, [lb_tmp_diff]
     dec  bl
 
-    ; DI = column base address
     mov  ax, bx
     mov  cx, LB_ROWS * LB_ESIZ
     mul  cx
     add  ax, lb_board
     mov  di, ax
 
-    ; CX = current used count for this column
     xor  ch, ch
     mov  cl, [lb_used + bx]
 
-    ; AX = new score to insert
     mov  ax, [lb_tmp_score]
 
-    ; find first slot whose score < new score (DX = slot index)
     xor  dx, dx
 .lbi_find:
     cmp  dx, cx
-    jae  .lbi_doins         ; reached end of used entries → append here
-    ; compare: entry[dx].score vs ax
+    jae  .lbi_doins         
     push ax
     push bx
     mov  bx, dx
     push cx
     mov  cx, LB_ESIZ
     xchg ax, bx
-    mul  cx                 ; ax = dx * LB_ESIZ  (dx was in bx, now ax after xchg)
-    xchg ax, bx             ; bx = dx*LB_ESIZ, ax = new score
+    mul  cx                 
+    xchg ax, bx             
     pop  cx
-    add  bx, di             ; bx = &entry[dx]
-    cmp  ax, [bx]           ; new score > entry[dx].score?
+    add  bx, di             
+    cmp  ax, [bx]           
     pop  bx
     pop  ax
-    ja   .lbi_doins         ; yes → insert here
+    ja   .lbi_doins         
     inc  dx
     jmp  .lbi_find
 
 .lbi_doins:
-    ; if dx >= LB_ROWS, no room (score too low for table)
     cmp  dx, LB_ROWS
     jae  .lbi_done
 
-    ; shift entries [dx .. min(used,LB_ROWS)-1] down by 1
-    ; number of entries to shift = min(used,LB_ROWS-1) - dx
-    mov  si, cx             ; si = used
+    mov  si, cx             
     cmp  si, LB_ROWS
     jb   .lbi_shok
-    mov  si, LB_ROWS - 1   ; cap so last slot is overwritten
+    mov  si, LB_ROWS - 1   
 .lbi_shok:
-    ; shift si-1 → si, si-2 → si-1, ... dx → dx+1
 .lbi_shloop:
     cmp  si, dx
     jbe  .lbi_shend
-    ; copy entry[si-1] → entry[si]
     push ax
     push bx
     push cx
-    ; compute src = di + (si-1)*LB_ESIZ
     mov  ax, si
     dec  ax
     mov  cx, LB_ESIZ
     mul  cx
     add  ax, di
-    push ax                 ; src addr on stack
-    ; compute dst = di + si*LB_ESIZ
+    push ax                 
     mov  ax, si
     mul  cx
     add  ax, di
-    mov  bx, ax             ; dst addr in bx
-    pop  ax                 ; src addr in ax
-    ; copy LB_ESIZ bytes
+    mov  bx, ax             
+    pop  ax                 
     push si
     mov  si, ax
     mov  cx, LB_ESIZ
@@ -1852,7 +1673,6 @@ lb_insert:
     jmp  .lbi_shloop
 
 .lbi_shend:
-    ; write new entry at slot dx: addr = di + dx*LB_ESIZ
     push ax
     push bx
     push cx
@@ -1860,14 +1680,12 @@ lb_insert:
     mov  cx, LB_ESIZ
     mul  cx
     add  ax, di
-    mov  bx, ax             ; bx = &entry[dx]
+    mov  bx, ax             
 
-    ; write score word
     mov  ax, [lb_tmp_score]
     mov  [bx], ax
     add  bx, 2
 
-    ; write name bytes
     push cs
     pop  ds
     mov  si, lb_tmp_name
@@ -1883,7 +1701,6 @@ lb_insert:
     pop  bx
     pop  ax
 
-    ; increment used count (cap at LB_ROWS)
     push cs
     pop  ds
     xor  bh, bh
@@ -1904,8 +1721,6 @@ lb_insert:
     ret
 
 ; ---------------------------------------------------------------------------
-; lb_readline  -  read one CR/LF-terminated line from [filehandle] into lb_rbuf
-; Returns: SI = lb_rbuf, CX = char count (0 = EOF)
 lb_readline:
     push ds
     push cs
@@ -1939,16 +1754,12 @@ lb_readline:
     pop  ds
     ret
 .lbrl_eof:
-    ; EOF reached - return whatever is in buffer (CX may be >0 for last line)
     mov  byte [di], 0
     mov  si, lb_rbuf
-    ; if CX=0 (truly empty), caller will stop; if CX>0, last line is parsed
     pop  ds
     ret
 
 ; ---------------------------------------------------------------------------
-; lb_skipfield  -  advance SI past the next comma
-; CF=1 if end-of-string reached with no comma
 lb_skipfield:
 .lbsf:
     mov  al, [si]
@@ -1964,8 +1775,6 @@ lb_skipfield:
     ret
 
 ; ---------------------------------------------------------------------------
-; lb_copyfield  -  copy field at SI into [DI], max CX chars, null-term
-; Stops at comma or null.  Advances SI past comma.  CF=1 if no comma.
 lb_copyfield:
     push cx
 .lbcf:
@@ -1975,7 +1784,7 @@ lb_copyfield:
     inc  si
     cmp  al, ','
     je   .lbcf_done
-    jcxz .lbcf             ; no room, keep scanning
+    jcxz .lbcf             
     mov  [di], al
     inc  di
     dec  cx
@@ -1992,7 +1801,6 @@ lb_copyfield:
     ret
 
 ; ---------------------------------------------------------------------------
-; lb_parsenum  -  parse decimal number at [SI] into AX.  Advances SI.
 lb_parsenum:
     xor  ax, ax
 .lbpn:
@@ -2014,6 +1822,7 @@ lb_parsenum:
     ret
 
 exit_program:
+    call shutdown_sound
     mov ax, 0003h
     int 10h
     ret
@@ -2021,10 +1830,6 @@ exit_program:
 ; =============================================================================
 ; GRAPHICS PRIMITIVES
 ; =============================================================================
-
-; -- plot_pixel ---------------------------------------------------------------
-; IN:  bx=x, di=y, al=colour
-; Preserves ALL registers
 plot_pixel:
     push ax
     push bx
@@ -2033,33 +1838,30 @@ plot_pixel:
     push si
     push es
 
-    mov cl, al              ; save colour byte
+    mov cl, al              
 
-    ; linear address = y * 640 + x
-    mov ax, di              ; ax = y
+    mov ax, di              
     mov si, 640
-    mul si                  ; dx:ax = y*640  (dx = bank, ax = offset)
-    add ax, bx              ; offset += x
-    adc dx, 0               ; carry into bank
+    mul si                  
+    add ax, bx              
+    adc dx, 0               
 
-    ; select VESA bank (dx = bank number)
-    push ax                 ; save offset
+    push ax                 
     push dx
     push bx
-    mov si, dx              ; bank into si so bx is free for VESA call
+    mov si, dx              
     mov ax, 4F05h
-    xor bx, bx              ; BX=0: set window A
-    mov dx, si              ; DX = bank number
+    xor bx, bx              
+    mov dx, si              
     int 10h
     pop bx
     pop dx
-    pop ax                  ; restore offset into ax
+    pop ax                  
 
-    ; write pixel
-    mov bx, ax              ; bx = offset within 64 KB window
+    mov bx, ax              
     mov ax, 0A000h
     mov es, ax
-    mov al, cl              ; colour
+    mov al, cl              
     mov [es:bx], al
 
     pop es
@@ -2070,9 +1872,6 @@ plot_pixel:
     pop ax
     ret
 
-; -- fill_hline ---------------------------------------------------------------
-; Fill cx pixels starting at (bx, dx) with colour al
-; Preserves all registers
 fill_hline:
     push bx
     push cx
@@ -2088,16 +1887,8 @@ fill_hline:
     ret
 
 ; =============================================================================
-; FONT ENGINE  -  8x8 bitmap font, one char per call
+; FONT ENGINE
 ; =============================================================================
-
-; char_width: pixels to advance per character (proportional feel with 8px glyphs)
-; We use fixed 8px wide glyphs.
-
-; -- draw_char ----------------------------------------------------------------
-; Draw ASCII char in al at screen position (bx=x, dx=y)
-; On return: bx advanced by 8 (next character x)
-; Preserves: ax, cx, dx, si, di
 draw_char:
     push ax
     push cx
@@ -2109,19 +1900,19 @@ draw_char:
     cmp al, 127
     ja  .dc_skip
 
-    sub al, 32              ; 0-based index
+    sub al, 32              
     xor ah, ah
     mov si, ax
-    shl si, 3               ; * 8 bytes per glyph
+    shl si, 3               
     add si, font_data
 
-    mov di, dx              ; row y
-    mov cx, 8               ; 8 rows
+    mov di, dx              
+    mov cx, 8               
 .dc_row:
     push cx
     push bx
-    mov ah, [si]            ; bit pattern for this row
-    mov cx, 8               ; 8 columns
+    mov ah, [si]            
+    mov cx, 8               
 .dc_col:
     test ah, 80h
     jz  .dc_no_px
@@ -2138,7 +1929,7 @@ draw_char:
     loop .dc_row
 
 .dc_skip:
-    add bx, 9              ; 8px glyph + 1px spacing
+    add bx, 9              
     pop di
     pop si
     pop cx
@@ -2160,7 +1951,7 @@ set_vesa_640x480:
     ret
 
 ; =============================================================================
-; BMP LOADER  (640x480 8bpp, bottom-up -> written top-of-screen first)
+; BMP LOADER 
 ; =============================================================================
 load_bmp_640x480:
     mov ax, 3D00h
@@ -2168,41 +1959,37 @@ load_bmp_640x480:
     jc  .fail
     mov [filehandle], ax
 
-    ; read 54-byte header
     mov bx, [filehandle]
     mov ah, 3Fh
     mov cx, 54
     mov dx, bmp_header
     int 21h
 
-    ; read 1024-byte palette (256 * 4 bytes BGRX)
     mov bx, [filehandle]
     mov ah, 3Fh
     mov cx, 1024
     mov dx, bmp_palette
     int 21h
 
-    ; program VGA palette (DAC)
     mov dx, 03C8h
     xor al, al
     out dx, al
-    inc dx                  ; 03C9h = data port
+    inc dx                  
     mov si, bmp_palette
     mov cx, 256
 .pal_loop:
-    mov al, [si+2]          ; R
+    mov al, [si+2]          
     shr al, 2
     out dx, al
-    mov al, [si+1]          ; G
+    mov al, [si+1]          
     shr al, 2
     out dx, al
-    mov al, [si+0]          ; B
+    mov al, [si+0]          
     shr al, 2
     out dx, al
     add si, 4
     loop .pal_loop
 
-    ; write pixel data bank by bank (640x480 = 307200 bytes, 5 banks of ~64K)
     xor si, si
 .full_banks:
     cmp si, 4
@@ -2245,11 +2032,10 @@ load_bmp_640x480:
     ret
 
 set_vesa_bank:
-    ; IN: DX = bank number. Do NOT push/pop DX - it must stay set for INT 10h
     push ax
     push bx
     mov ax, 4F05h
-    xor bx, bx              ; BX=0 = write window A, DX = bank number
+    xor bx, bx              
     int 10h
     pop bx
     pop ax
@@ -2267,161 +2053,173 @@ read_chunk_to_vram:
     ret
 
 ; =============================================================================
+; BACKGROUND IMF AUDIO ENGINE
+; =============================================================================
+setup_sound:
+    mov ax, 351Ch
+    int 21h
+    mov [old_int1C_off], bx
+    mov [old_int1C_seg], es
+    push ds
+    push cs
+    pop ds
+    mov ax, 251Ch
+    mov dx, imf_timer_tick
+    int 21h
+    pop ds
+    ret
+
+shutdown_sound:
+    call stop_music
+    push ds
+    mov ax, 251Ch
+    mov dx, [old_int1C_off]
+    mov ds, [old_int1C_seg]
+    int 21h
+    pop ds
+    ret
+
+stop_music:
+    cmp word [imf_handle], 0
+    je .silence
+    mov ah, 3Eh
+    mov bx, [imf_handle]
+    int 21h
+    mov word [imf_handle], 0
+.silence:
+    mov byte [current_track], 0
+    mov word [imf_delay], 0
+    mov cx, 0F5h
+    mov bl, 0
+.clear_loop:
+    mov al, bl
+    mov ah, 0
+    call write_opl2
+    inc bl
+    loop .clear_loop
+    ret
+
+write_opl2:
+    push ax
+    push cx
+    push dx
+    mov dx, 388h
+    out dx, al
+    mov cx, 6             
+.wait1: in al, dx
+    loop .wait1
+    mov dx, 389h
+    mov al, ah
+    out dx, al
+    mov dx, 388h
+    mov cx, 35            
+.wait2: in al, dx
+    loop .wait2
+    pop dx
+    pop cx
+    pop ax
+    ret
+
+play_welcome:
+    cmp byte [current_track], 1
+    je .done
+    call stop_music
+    mov byte [current_track], 1
+    mov dx, imf_file_welcome
+    call load_imf
+.done: ret
+
+play_playing:
+    cmp byte [current_track], 2
+    je .done
+    call stop_music
+    mov byte [current_track], 2
+    mov dx, imf_file_playing
+    call load_imf
+.done: ret
+
+load_imf:
+    mov ax, 3D00h         
+    int 21h
+    jc .error
+    mov [imf_handle], ax
+    mov word [imf_delay], 0
+.error: ret
+
+imf_timer_tick:
+    pushf                 
+    call far [cs:old_int1C_off] 
+    
+    push ax
+    push bx
+    push cx
+    push dx
+    push ds
+    push cs
+    pop ds
+
+    cmp word [imf_handle], 0
+    je .tick_done
+    cmp word [imf_delay], 0
+    ja .dec_delay
+
+.read_loop:
+    mov ah, 3Fh
+    mov bx, [imf_handle]
+    mov cx, 4
+    mov dx, imf_buffer
+    int 21h
+    cmp ax, 4
+    jne .loop_track       
+
+    mov al, [imf_buffer+0] 
+    mov ah, [imf_buffer+1] 
+    call write_opl2
+
+    mov ax, word [imf_buffer+2]
+    mov [imf_delay], ax
+
+    cmp word [imf_delay], 0
+    je .read_loop
+    jmp .tick_done
+
+.loop_track:
+    mov ax, 4200h         
+    mov bx, [imf_handle]
+    xor cx, cx
+    xor dx, dx
+    int 21h
+    jmp .read_loop
+
+.dec_delay:
+    cmp byte [current_track], 2  ; Is PLAYING.IMF active?
+    je  .speed_up
+
+    ; --- Normal Speed (For WELCOME.IMF) ---
+    dec word [imf_delay]
+    jmp .tick_done
+
+.speed_up:
+    ; --- Fast Speed (For PLAYING.IMF) ---
+    sub word [imf_delay], 38     ; Adjust this number if it's too fast/slow (e.g. 4 for 70Hz)
+    jbe .force_read              ; If delay <= 0, immediately trigger next read
+    jmp .tick_done
+
+.force_read:
+    mov word [imf_delay], 0
+    jmp .read_loop
+
+.tick_done:
+    pop ds
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    iret
+
+; =============================================================================
 ; DATA
 ; =============================================================================
-; =============================================================================
-; SOUND - PC Speaker melody extracted from WELCOME.WAV
-; Timing via BIOS INT 1Ah (18.2Hz real hardware clock - CPU-speed independent)
-; Note table: DW pit_divisor (1193180/Hz, 0=rest), DW bios_ticks (1 tick=54.9ms)
-; =============================================================================
-
-snd_start:
-    push ax
-    push cx
-    push dx
-    mov  word [note_ptr], jingle_notes
-    ; PIT ch2 = square wave generator
-    mov  al, 0B6h
-    out  43h, al
-    ; Read current tick for deadline base
-    mov  ah, 00h
-    int  1Ah
-    mov  [tick_hi], cx
-    mov  [tick_lo], dx
-    call note_play          ; start first note immediately
-    pop  dx
-    pop  cx
-    pop  ax
-    ret
-
-snd_tick:
-    push ax
-    push cx
-    push dx
-    mov  ah, 00h
-    int  1Ah                ; cx:dx = current ticks
-    cmp  cx, [tick_hi]
-    ja   .advance
-    jb   .done
-    cmp  dx, [tick_lo]
-    jb   .done
-.advance:
-    call note_play
-.done:
-    pop  dx
-    pop  cx
-    pop  ax
-    ret
-
-note_play:
-    push ax
-    push bx
-    push cx
-    push dx
-    mov  bx, [note_ptr]
-    mov  ax, [bx]           ; divisor
-    cmp  ax, 0FFFFh
-    jne  .ok
-    mov  word [note_ptr], jingle_notes
-    mov  bx, jingle_notes
-    mov  ax, [bx]
-.ok:
-    mov  cx, [bx+2]         ; duration ticks - save before INT clobbers
-    push cx
-    add  word [note_ptr], 4
-    mov  ah, 00h
-    int  1Ah                ; cx:dx = now
-    pop  bx                 ; bx = duration
-    add  dx, bx
-    adc  cx, 0
-    mov  [tick_lo], dx
-    mov  [tick_hi], cx
-    ; reload divisor (ax clobbered by INT 1Ah)
-    push bx
-    mov  bx, [note_ptr]
-    sub  bx, 4
-    mov  ax, [bx]
-    pop  bx
-    or   ax, ax
-    jz   .rest
-    out  42h, al
-    mov  al, ah
-    out  42h, al
-    in   al, 61h
-    or   al, 03h
-    out  61h, al
-    jmp  .np_done
-.rest:
-    in   al, 61h
-    and  al, 0FCh
-    out  61h, al
-.np_done:
-    pop  dx
-    pop  cx
-    pop  bx
-    pop  ax
-    ret
-
-snd_stop:
-    push ax
-    in   al, 61h
-    and  al, 0FCh
-    out  61h, al
-    pop  ax
-    ret
-
-; --- Note table: melody extracted from WELCOME.WAV ---
-jingle_notes:
-    dw  2280,  3  ; C5    0.14s
-    dw  2711,  5  ; A4    0.26s
-    dw  1708,  5  ; F5    0.28s
-    dw  1279,  3  ; Bb5   0.18s
-    dw  1708,  3  ; F5    0.16s
-    dw  1521,  2  ; G5    0.10s
-    dw  1436,  3  ; Ab5   0.16s
-    dw  1708,  5  ; F5    0.30s
-    dw  2711,  4  ; A4    0.20s
-    dw  1708,  1  ; F5    0.08s
-    dw  1436,  7  ; Ab5   0.38s
-    dw  1708,  5  ; F5    0.26s
-    dw  2711,  3  ; A4    0.18s
-    dw  1708,  3  ; F5    0.18s
-    dw  1355,  2  ; A5    0.12s
-    dw  1436,  1  ; Ab5   0.08s
-    dw  1708,  6  ; F5    0.32s
-    dw  1708,  5  ; F5    0.30s
-    dw  1355,  4  ; A5    0.22s
-    dw  1708,  5  ; F5    0.26s
-    dw  1279,  4  ; Bb5   0.20s
-    dw  1708,  2  ; F5    0.10s
-    dw  1521,  1  ; G5    0.08s
-    dw  1436,  5  ; Ab5   0.26s
-    dw  1708,  5  ; F5    0.28s
-    dw  2711,  4  ; A4    0.24s
-    dw  1708,  1  ; F5    0.08s
-    dw  1436,  7  ; Ab5   0.38s
-    dw  1708,  5  ; F5    0.26s
-    dw  1355,  4  ; A5    0.22s
-    dw  1708,  1  ; F5    0.08s
-    dw  1612,  2  ; F#5   0.12s
-    dw  1355,  2  ; A5    0.10s
-    dw  1708,  6  ; F5    0.32s
-    dw  1355,  2  ; A5    0.10s
-    dw  2711,  2  ; A4    0.10s
-    dw  1708,  5  ; F5    0.26s
-    dw  1355,  4  ; A5    0.20s
-    dw  1708,  4  ; F5    0.22s
-    dw  1355,  3  ; A5    0.14s
-    dw  1708,  3  ; F5    0.18s
-    dw  1436,  5  ; Ab5   0.26s
-    dw  1708,  5  ; F5    0.26s
-    dw  1708,  4  ; F5    0.22s
-    dw  1708,  1  ; F5    0.08s
-    dw  1708,  4  ; F5    0.22s
-    dw  2711,  2  ; A4    0.10s
-    dw 0FFFFh, 0  ; END -> loop
-
-
 file_welcome:     db 'WELCOME.BMP', 0
 file_gamemode:    db 'GAMEMOD.BMP', 0
 file_2p_p1ready:  db '2P-PLAYER1.BMP', 0
@@ -2446,7 +2244,6 @@ file_q_trg_e:     db 'ES-TRG.BMP', 0
 file_q_crl_e:     db 'ES-CRL.BMP', 0
 file_q_crl2_e:    db 'ES-CRL2.BMP', 0
 
-; Easy question BMP table (word pointers)
 q_bmp_table:
     dw file_q_sqr_e
     dw file_q_str_e
@@ -2454,21 +2251,15 @@ q_bmp_table:
     dw file_q_crl_e
     dw file_q_crl2_e
 
-; Easy correct answer table: 1=press1, 2=press2
-; SQR=2  STR=2  TRG=1  CRL=1  CRL2=2
 q_ans_table:
     db 2, 2, 1, 1, 2
 
-; ---------------------------------------------------------------------------
-; Medium round (Young Bee) BMP filenames
-; ---------------------------------------------------------------------------
 file_q_d_med:     db 'MD-DIA.BMP', 0
 file_q_h_med:     db 'MD-HRT.BMP', 0
 file_q_st_med:    db 'MD-STR.BMP', 0
 file_q_sq_med:    db 'MD-SQR.BMP', 0
 file_q_rec_med:   db 'MD-RECT.BMP', 0
 
-; Medium question BMP table (word pointers)
 q_bmp_table_med:
     dw file_q_d_med
     dw file_q_h_med
@@ -2476,27 +2267,15 @@ q_bmp_table_med:
     dw file_q_sq_med
     dw file_q_rec_med
 
-; Medium correct answer table: 1=press1, 2=press2
-; D   (Diamond)   -> 1
-; H   (Heart)     -> 2
-; ST  (Star)      -> 1
-; SQ  (Square)    -> 2
-; REC (Rectangle) -> 1
-; Medium correct answer table: 1=press1, 2=press2, 3=press3
-; D(Diamond)=1  H(Heart)=2  ST(Star)=2  SQ(Square)=3  REC(Rectangle)=3
 q_ans_table_med:
     db 1, 2, 2, 3, 3
 
-; ---------------------------------------------------------------------------
-; Hard round (Big Bee) BMP filenames
-; ---------------------------------------------------------------------------
 file_q_spr_hard:  db 'HD-SPR.BMP', 0
 file_q_pt_hard:   db 'HD-PT.BMP', 0
 file_q_ot_hard:   db 'HD-OT.BMP', 0
 file_q_clr_hard:  db 'HD-CLR.BMP', 0
 file_q_cb_hard:   db 'HD-CB.BMP', 0
 
-; Hard question BMP table (word pointers)
 q_bmp_table_hard:
     dw file_q_spr_hard
     dw file_q_pt_hard
@@ -2504,15 +2283,21 @@ q_bmp_table_hard:
     dw file_q_clr_hard
     dw file_q_cb_hard
 
-; Hard correct answer table: 1=press1 2=press2 3=press3 4=press4
-; SPR=3  PT=4  OT=4  CLR=2  CB=2
 q_ans_table_hard:
     db 3, 4, 4, 2, 2
 
+imf_file_welcome  db 'WELCOME.IMF', 0
+imf_file_playing  db 'PLAYING.IMF', 0
+
+current_track     db 0    
+imf_handle        dw 0    
+imf_delay         dw 0    
+old_int1C_off     dw 0    
+old_int1C_seg     dw 0    
+imf_buffer        times 4 db 0 
+post_game_flag    db 0    
+
 filehandle:       dw 0
-note_ptr: dw jingle_notes
-tick_lo:  dw 0
-tick_hi:  dw 0
 bmp_header:       times 54   db 0
 bmp_palette:      times 1024 db 0
 
@@ -2521,37 +2306,35 @@ player2_name:     times MAX_NAME+1 db 0
 p1_len:           db 0
 p2_len:           db 0
 active_field:     db 0
-game_mode:        db 0    ; 1 = single player, 2 = two player
-difficulty:       db 0    ; 1 = Baby Bee, 2 = Young Bee, 3 = Big Bee
-current_player:   db 0    ; 2P mode: 0 = Player 1's turn, 1 = Player 2's turn
-p1_score:         dw 0    ; 2P mode: Player 1 saved score
-p2_score:         dw 0    ; 2P mode: Player 2 saved score
-p1_correct:       db 0    ; 2P mode: Player 1 saved correct count
-p2_correct:       db 0    ; 2P mode: Player 2 saved correct count
-sn_byte:          db 0    ; scratch byte for save_names writes
-hud_color:        db 0    ; scratch for HUD drawing color
-cur_max_hearts:   db 3    ; hearts for current round (set by start_game)
-cur_total_q:      db 3    ; total questions for current round
-cur_bmp_table:    dw q_bmp_table    ; pointer to active question BMP table
-cur_ans_table:    dw q_ans_table    ; pointer to active answer table
-hearts:           db 0    ; current hearts remaining
-game_score:       dw 0    ; current game score
-q_num:            db 0    ; current question number (0-based)
-correct_count:    db 0    ; number of correct answers
-num_buf:          times 8 db 0  ; scratch buffer for number-to-string
+game_mode:        db 0    
+difficulty:       db 0    
+current_player:   db 0    
+p1_score:         dw 0    
+p2_score:         dw 0    
+p1_correct:       db 0    
+p2_correct:       db 0    
+sn_byte:          db 0    
+hud_color:        db 0    
+cur_max_hearts:   db 3    
+cur_total_q:      db 3    
+cur_bmp_table:    dw q_bmp_table    
+cur_ans_table:    dw q_ans_table    
+hearts:           db 0    
+game_score:       dw 0    
+q_num:            db 0    
+correct_count:    db 0    
+num_buf:          times 8 db 0  
 
-; Leaderboard data
-lb_board:    times 3 * 5 * 12 db 0  ; 3 cols x 5 rows x 12 bytes each
-lb_used:     db 0, 0, 0              ; used count per column
-lb_rbuf:     times 130 db 0          ; line read buffer
-lb_tmp_name: times 11  db 0          ; temp name buffer (10 + null)
-lb_tmp_score: dw 0                   ; temp score
-lb_tmp_diff:  db 0                   ; temp difficulty
-lb_col_x:     dw 0                   ; current column x for drawing
+lb_board:    times 3 * 5 * 12 db 0  
+lb_used:     db 0, 0, 0              
+lb_rbuf:     times 130 db 0          
+lb_tmp_name: times 11  db 0          
+lb_tmp_score: dw 0                   
+lb_tmp_diff:  db 0                   
+lb_col_x:     dw 0                   
 
 ; =============================================================================
-; 8x8 BITMAP FONT  ASCII 32-127  (96 glyphs x 8 bytes)
-; Classic VGA BIOS font (CP437) - proven readable at 8x8
+; 8x8 BITMAP FONT 
 ; =============================================================================
 font_data:
 ; 32 space
