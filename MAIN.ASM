@@ -47,14 +47,11 @@ start:
     pop ds
     mov dx, file_welcome
     call load_bmp_640x480
-    call snd_start
 
 wait_welcome:
-    call snd_tick
     mov ah, 01h
     int 16h
     jz  wait_welcome
-    call snd_stop
     mov ah, 00h
     int 16h
     cmp al, 'P'
@@ -126,6 +123,13 @@ wait_login1:
     cmp byte [p1_len], MAX_NAME
     jae wait_login1
 
+    ; convert lowercase to uppercase before storing
+    cmp al, 'a'
+    jb  .l1_store
+    cmp al, 'z'
+    ja  .l1_store
+    sub al, 32              ; to uppercase
+.l1_store:
     ; store typed character at player1_name[p1_len]
     mov bl, [p1_len]
     xor bh, bh
@@ -324,6 +328,13 @@ wait_login2:
     cmp al, 32
     jb  wait_login2
 
+    ; convert lowercase to uppercase
+    cmp al, 'a'
+    jb  .l2_store
+    cmp al, 'z'
+    ja  .l2_store
+    sub al, 32
+.l2_store:
     cmp byte [active_field], 0
     je  login2_add_p1
 
@@ -387,6 +398,9 @@ login2_enter_p2:
     cmp byte [p2_len], 0
     je  wait_login2
     mov byte [game_mode], 2  ; two player
+    mov byte [current_player], 0  ; always start with Player 1
+    mov word [p1_score], 0
+    mov word [p2_score], 0
     call save_names          ; persist names to NAMES.DAT
     jmp show_difficulty
 
@@ -613,6 +627,25 @@ start_game:
     mov  byte [q_num],          0
     mov  byte [correct_count],  0
 
+    ; --- 2P: show player-ready splash before starting ---
+    cmp  byte [game_mode], 2
+    jne  game_loop
+    cmp  byte [current_player], 0
+    je   .sg_show_p1
+    ; Player 2's turn
+    push cs
+    pop  ds
+    mov  dx, file_2p_p2ready
+    call load_bmp_640x480
+    call delay_2s
+    jmp  game_loop
+.sg_show_p1:
+    push cs
+    pop  ds
+    mov  dx, file_2p_p1ready
+    call load_bmp_640x480
+    call delay_2s
+
 game_loop:
     push cs
     pop  ds
@@ -729,6 +762,24 @@ start_game_med:
     mov  word [game_score],     0
     mov  byte [q_num],          0
     mov  byte [correct_count],  0
+
+    ; --- 2P: show player-ready splash before starting ---
+    cmp  byte [game_mode], 2
+    jne  game_loop
+    cmp  byte [current_player], 0
+    je   .sgm_show_p1
+    push cs
+    pop  ds
+    mov  dx, file_2p_p2ready
+    call load_bmp_640x480
+    call delay_2s
+    jmp  game_loop
+.sgm_show_p1:
+    push cs
+    pop  ds
+    mov  dx, file_2p_p1ready
+    call load_bmp_640x480
+    call delay_2s
     jmp  game_loop
 
 ; =============================================================================
@@ -748,6 +799,24 @@ start_game_hard:
     mov  word [game_score],     0
     mov  byte [q_num],          0
     mov  byte [correct_count],  0
+
+    ; --- 2P: show player-ready splash before starting ---
+    cmp  byte [game_mode], 2
+    jne  game_loop
+    cmp  byte [current_player], 0
+    je   .sgh_show_p1
+    push cs
+    pop  ds
+    mov  dx, file_2p_p2ready
+    call load_bmp_640x480
+    call delay_2s
+    jmp  game_loop
+.sgh_show_p1:
+    push cs
+    pop  ds
+    mov  dx, file_2p_p1ready
+    call load_bmp_640x480
+    call delay_2s
     jmp  game_loop
 
 ; ---------------------------------------------------------------------------
@@ -755,6 +824,33 @@ start_game_hard:
 game_finish:
     push cs
     pop  ds
+
+    ; --- 2P mode: handle turn handoff or winner reveal ---
+    cmp  byte [game_mode], 2
+    jne  .gf_single
+
+    cmp  byte [current_player], 0
+    jne  .gf_p2_done
+
+    ; --- P1 just finished: save results, start P2's turn ---
+    mov  ax, [game_score]
+    mov  [p1_score], ax
+    mov  al, [correct_count]
+    mov  [p1_correct], al
+    mov  byte [current_player], 1
+    jmp  start_game           ; replay same difficulty for P2
+
+.gf_p2_done:
+    ; --- P2 just finished: save P2 results, show winner ---
+    mov  ax, [game_score]
+    mov  [p2_score], ax
+    mov  al, [correct_count]
+    mov  [p2_correct], al
+    call save_score_2p
+    jmp  show_2p_winner
+
+.gf_single:
+    ; --- single-player finish (original logic) ---
     mov  al, [correct_count]
     mov  bl, 100
     mul  bl
@@ -787,11 +883,137 @@ game_finish:
 game_over_screen:
     push cs
     pop  ds
+
+    ; --- 2P mode: game-over mid-turn ---
+    cmp  byte [game_mode], 2
+    jne  .go_single
+
+    cmp  byte [current_player], 0
+    jne  .go_p2_done
+
+    ; P1 ran out of hearts: score is whatever they earned, hand to P2
+    mov  ax, [game_score]
+    mov  [p1_score], ax
+    mov  al, [correct_count]
+    mov  [p1_correct], al
+    mov  byte [current_player], 1
+    jmp  start_game           ; P2 plays same round
+
+.go_p2_done:
+    ; P2 ran out of hearts: finalize and show winner
+    mov  ax, [game_score]
+    mov  [p2_score], ax
+    mov  al, [correct_count]
+    mov  [p2_correct], al
+    call save_score_2p
+    jmp  show_2p_winner
+
+.go_single:
     mov  dx, file_tryagain
     call load_bmp_640x480
     call save_score
     call delay_2s
     jmp  show_leaderboard
+
+; ---------------------------------------------------------------------------
+; show_2p_winner  -  compare P1 vs P2 scores and show result
+; ---------------------------------------------------------------------------
+show_2p_winner:
+    push cs
+    pop  ds
+    ; reset current_player for next game
+    mov  byte [current_player], 0
+
+    mov  ax, [p1_score]
+    mov  bx, [p2_score]
+    cmp  ax, bx
+    ja   .w_p1wins
+    jb   .w_p2wins
+    ; draw
+    mov  dx, file_2p_draw
+    jmp  .w_show
+.w_p1wins:
+    mov  dx, file_2p_p1wins
+    jmp  .w_show
+.w_p2wins:
+    mov  dx, file_2p_p2wins
+.w_show:
+    call load_bmp_640x480
+
+    ; draw both scores on screen
+    ; P1 score label at (60, 300)
+    push cs
+    pop  ds
+    mov  bx, 60
+    mov  dx, 300
+    mov  al, 'P'
+    call draw_char
+    mov  al, '1'
+    call draw_char
+    mov  al, ':'
+    call draw_char
+    mov  ax, [p1_score]
+    call draw_num_ax
+
+    ; P2 score label at (360, 300)
+    mov  bx, 360
+    mov  dx, 300
+    mov  al, 'P'
+    call draw_char
+    mov  al, '2'
+    call draw_char
+    mov  al, ':'
+    call draw_char
+    mov  ax, [p2_score]
+    call draw_num_ax
+
+    call delay_2s
+    call delay_2s
+
+wait_2p_winner:
+    mov  ah, 00h
+    int  16h
+    cmp  al, 27
+    je   start
+    cmp  al, 13
+    je   show_leaderboard
+    jmp  wait_2p_winner
+
+; ---------------------------------------------------------------------------
+; save_score_2p  -  save both players' scores for 2P mode
+; Writes two records: one for P1, one for P2
+; ---------------------------------------------------------------------------
+save_score_2p:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push ds
+    push cs
+    pop  ds
+
+    ; temporarily swap game_score/correct_count to P1 values and save
+    mov  ax, [p1_score]
+    mov  [game_score], ax
+    mov  al, [p1_correct]
+    mov  [correct_count], al
+    call save_score
+
+    ; now save P2 values
+    mov  ax, [p2_score]
+    mov  [game_score], ax
+    mov  al, [p2_correct]
+    mov  [correct_count], al
+    call save_score
+
+    pop  ds
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
 
 ; ---------------------------------------------------------------------------
 ; set_heart_colors  -  force VGA DAC palette entries for HUD hearts + text
@@ -1004,6 +1226,25 @@ draw_hud:
     add  al, '0'
     call draw_char
 
+    ; ── 2P: draw current player indicator ──────────────────────────────────
+    cmp  byte [game_mode], 2
+    jne  .dh_no2p
+    mov  bx, 560
+    mov  dx, QN_Y
+    cmp  byte [current_player], 0
+    je   .dh_p1tag
+    mov  al, 'P'
+    call draw_char
+    mov  al, '2'
+    call draw_char
+    jmp  .dh_no2p
+.dh_p1tag:
+    mov  al, 'P'
+    call draw_char
+    mov  al, '1'
+    call draw_char
+.dh_no2p:
+
     pop  ds
     pop  si
     pop  dx
@@ -1093,9 +1334,9 @@ delay_2s:
     ret
 
 ; ---------------------------------------------------------------------------
-; save_score - appends ,DIFF,SCORE to the last record line in NAMES.TXT
-; Seeks to end-2 (before last CRLF), writes ",DIFF,SCORE\r\n"
-; Final record format: MODE,P1NAME,P2NAME,DIFF,SCORE\r\n
+; save_score - appends complete record to NAMES.TXT
+; Format: MODE,P1NAME,P2NAME,DIFF,SCORE\r\n
+; Opens (or creates) NAMES.TXT, seeks to end, writes the full line atomically.
 ; ---------------------------------------------------------------------------
 save_score:
     push ax
@@ -1107,46 +1348,81 @@ save_score:
     push cs
     pop  ds
 
+    ; open for read/write, create if missing
     mov  ah, 3Dh
-    mov  al, 02h
+    mov  al, 02h             ; read+write
+    mov  dx, file_names
+    int  21h
+    jnc  .ss_seek
+    ; file doesn't exist — create it
+    mov  ah, 3Ch
+    xor  cx, cx
     mov  dx, file_names
     int  21h
     jc   .ss_done
+.ss_seek:
     mov  [filehandle], ax
-
-    ; seek to end-2 to overwrite last CRLF
+    ; seek to end so we always append
     mov  ah, 42h
     mov  al, 02h
     mov  bx, [filehandle]
-    mov  cx, 0FFFFh
-    mov  dx, 0FFFEh
+    xor  cx, cx
+    xor  dx, dx
     int  21h
 
-    ; write ",DIFF," (e.g. ",1,")
+    ; ── write MODE digit ──────────────────────────────────────────────────
+    mov  al, [game_mode]
+    add  al, '0'
+    mov  [sn_byte], al
+    call .ss_wb
+
+    ; ── write comma ───────────────────────────────────────────────────────
     mov  byte [sn_byte], ','
-    mov  bx, [filehandle]
-    mov  ah, 40h
-    mov  cx, 1
-    mov  dx, sn_byte
-    int  21h
-    ; write difficulty digit
+    call .ss_wb
+
+    ; ── write P1 name ─────────────────────────────────────────────────────
+    mov  si, player1_name
+.ss_p1:
+    mov  al, [si]
+    or   al, al
+    jz   .ss_p1done
+    mov  [sn_byte], al
+    call .ss_wb
+    inc  si
+    jmp  .ss_p1
+.ss_p1done:
+
+    ; ── write comma ───────────────────────────────────────────────────────
+    mov  byte [sn_byte], ','
+    call .ss_wb
+
+    ; ── write P2 name ─────────────────────────────────────────────────────
+    mov  si, player2_name
+.ss_p2:
+    mov  al, [si]
+    or   al, al
+    jz   .ss_p2done
+    mov  [sn_byte], al
+    call .ss_wb
+    inc  si
+    jmp  .ss_p2
+.ss_p2done:
+
+    ; ── write comma ───────────────────────────────────────────────────────
+    mov  byte [sn_byte], ','
+    call .ss_wb
+
+    ; ── write DIFF digit ──────────────────────────────────────────────────
     mov  al, [difficulty]
     add  al, '0'
     mov  [sn_byte], al
-    mov  bx, [filehandle]
-    mov  ah, 40h
-    mov  cx, 1
-    mov  dx, sn_byte
-    int  21h
-    ; write comma before score
-    mov  byte [sn_byte], ','
-    mov  bx, [filehandle]
-    mov  ah, 40h
-    mov  cx, 1
-    mov  dx, sn_byte
-    int  21h
+    call .ss_wb
 
-    ; write score digits
+    ; ── write comma ───────────────────────────────────────────────────────
+    mov  byte [sn_byte], ','
+    call .ss_wb
+
+    ; ── write SCORE digits ────────────────────────────────────────────────
     mov  ax, [game_score]
     push cs
     pop  ds
@@ -1156,7 +1432,7 @@ save_score:
     jne  .ss_digits
     dec  si
     mov  byte [si], '0'
-    jmp  .ss_write
+    jmp  .ss_wrnum
 .ss_digits:
     push bx
     mov  bx, 10
@@ -1171,37 +1447,24 @@ save_score:
     jmp  .ss_dloop
 .ss_dloop_done:
     pop  bx
-
-.ss_write:
-    ; si = first digit char
-    push si
+.ss_wrnum:
 .ss_wloop:
     mov  al, [si]
     or   al, al
     jz   .ss_wcrlf
     mov  [sn_byte], al
-    mov  bx, [filehandle]
-    mov  ah, 40h
-    mov  cx, 1
-    mov  dx, sn_byte
-    int  21h
+    call .ss_wb
     inc  si
     jmp  .ss_wloop
-.ss_wcrlf:
-    pop  si
-    mov  byte [sn_byte], 13
-    mov  bx, [filehandle]
-    mov  ah, 40h
-    mov  cx, 1
-    mov  dx, sn_byte
-    int  21h
-    mov  byte [sn_byte], 10
-    mov  bx, [filehandle]
-    mov  ah, 40h
-    mov  cx, 1
-    mov  dx, sn_byte
-    int  21h
 
+    ; ── write CR LF ───────────────────────────────────────────────────────
+.ss_wcrlf:
+    mov  byte [sn_byte], 13
+    call .ss_wb
+    mov  byte [sn_byte], 10
+    call .ss_wb
+
+    ; ── close file ────────────────────────────────────────────────────────
     mov  ah, 3Eh
     mov  bx, [filehandle]
     int  21h
@@ -1215,6 +1478,21 @@ save_score:
     pop  ax
     ret
 
+    ; ── helper: write one byte from [sn_byte] ─────────────────────────────
+.ss_wb:
+    push ax
+    push cx
+    push dx
+    mov  bx, [filehandle]
+    mov  ah, 40h
+    mov  cx, 1
+    mov  dx, sn_byte
+    int  21h
+    pop  dx
+    pop  cx
+    pop  ax
+    ret
+
 ; =============================================================================
 ; SAVE NAMES  -  appends one plain-text line to NAMES.TXT
 ; Format per line:  MODE,PLAYER1,PLAYER2<CR><LF>
@@ -1223,126 +1501,8 @@ save_score:
 ; Easy to read in any text editor and in VIEWREC.
 ; =============================================================================
 save_names:
-    push ax
-    push bx
-    push cx
-    push dx
-    push si
-    push ds
-
-    ; ensure DS = CS so all label references work correctly
-    push cs
-    pop ds
-
-    ; open NAMES.TXT for append, create if missing
-    mov ah, 3Dh
-    mov al, 01h              ; write access
-    mov dx, file_names
-    int 21h
-    jnc .sn_seek
-
-    ; doesn't exist - create it
-    mov ah, 3Ch
-    mov cx, 0
-    mov dx, file_names
-    int 21h
-    jc  .sn_done
-    mov [filehandle], ax
-    jmp .sn_write
-
-.sn_seek:
-    mov [filehandle], ax
-    mov ah, 42h              ; seek to end
-    mov al, 02h
-    mov bx, [filehandle]
-    xor cx, cx
-    xor dx, dx
-    int 21h
-
-.sn_write:
-    ; write mode digit  ('1' or '2')
-    mov al, [game_mode]
-    add al, '0'
-    mov [sn_byte], al
-    mov bx, [filehandle]
-    mov ah, 40h
-    mov cx, 1
-    mov dx, sn_byte
-    int 21h
-
-    ; write comma
-    mov byte [sn_byte], ','
-    mov bx, [filehandle]
-    mov ah, 40h
-    mov cx, 1
-    mov dx, sn_byte
-    int 21h
-
-    ; write player1 name char by char
-    mov si, player1_name
-.sn_p1:
-    mov al, [si]
-    or  al, al
-    jz  .sn_p1_done
-    mov [sn_byte], al
-    mov bx, [filehandle]
-    mov ah, 40h
-    mov cx, 1
-    mov dx, sn_byte
-    int 21h
-    inc si
-    jmp .sn_p1
-.sn_p1_done:
-
-    ; write comma
-    mov byte [sn_byte], ','
-    mov bx, [filehandle]
-    mov ah, 40h
-    mov cx, 1
-    mov dx, sn_byte
-    int 21h
-
-    ; write player2 name char by char
-    mov si, player2_name
-.sn_p2:
-    mov al, [si]
-    or  al, al
-    jz  .sn_p2_done
-    mov [sn_byte], al
-    mov bx, [filehandle]
-    mov ah, 40h
-    mov cx, 1
-    mov dx, sn_byte
-    int 21h
-    inc si
-    jmp .sn_p2
-.sn_p2_done:
-
-    ; write CR LF
-    mov byte [sn_byte], 13
-    mov bx, [filehandle]
-    mov ah, 40h
-    mov cx, 1
-    mov dx, sn_byte
-    int 21h
-    mov byte [sn_byte], 10
-    mov bx, [filehandle]
-    mov ah, 40h
-    mov cx, 1
-    mov dx, sn_byte
-    int 21h
-
-    mov ah, 3Eh
-    mov bx, [filehandle]
-    int 21h
-
-.sn_done:
-    pop ds
-    pop si
-    pop dx
-    pop cx
-    pop bx
-    pop ax
+    ; Record is now written atomically by save_score.
+    ; save_names is kept so existing call sites still assemble.
     ret
 
 ; =============================================================================
@@ -1491,8 +1651,13 @@ wait_leaderboard:
     mov  ah, 00h
     int  16h
     cmp  al, 27
-    je   start
+    je   ret_home_from_lb   ; ESC -> home
+    cmp  al, 13
+    je   ret_home_from_lb   ; Enter -> home
     jmp  wait_leaderboard
+
+ret_home_from_lb:
+    jmp  start
 
 ; ---------------------------------------------------------------------------
 ; lb_drawcol  -  draw one leaderboard column
@@ -1536,7 +1701,7 @@ lb_drawcol:
     ; bx = column x (reset each row)
     mov  bx, [lb_col_x]
 
-    ; draw name: LB_NLEN chars starting at [si+2]
+    ; draw name: up to LB_NLEN chars starting at [si+2]
     ; si currently points to entry base (score word first, then name)
     push si
     add  si, 2              ; point past score word to name
@@ -1545,22 +1710,18 @@ lb_drawcol:
 .lcol_name:
     mov  al, [si]
     or   al, al
-    jz   .lcol_npad
+    jz   .lcol_name_done
     call draw_char
     inc  si
     dec  cx
     jnz  .lcol_name
-    jmp  .lcol_sep
-.lcol_npad:
-    mov  al, ' '
-    call draw_char
-    dec  cx
-    jnz  .lcol_npad
-.lcol_sep:
-    mov  al, ' '
-    call draw_char          ; separator space
+.lcol_name_done:
     pop  cx
     pop  si                 ; si = entry base again
+
+    ; jump BX to fixed score position: column_x + 8*6 = column_x + 48
+    mov  bx, [lb_col_x]
+    add  bx, 48
 
     ; draw score: read word at [si]
     push ax
@@ -1778,8 +1939,10 @@ lb_readline:
     pop  ds
     ret
 .lbrl_eof:
+    ; EOF reached - return whatever is in buffer (CX may be >0 for last line)
     mov  byte [di], 0
     mov  si, lb_rbuf
+    ; if CX=0 (truly empty), caller will stop; if CX>0, last line is parsed
     pop  ds
     ret
 
@@ -1975,7 +2138,7 @@ draw_char:
     loop .dc_row
 
 .dc_skip:
-    add bx, 8
+    add bx, 9              ; 8px glyph + 1px spacing
     pop di
     pop si
     pop cx
@@ -2082,13 +2245,12 @@ load_bmp_640x480:
     ret
 
 set_vesa_bank:
+    ; IN: DX = bank number. Do NOT push/pop DX - it must stay set for INT 10h
     push ax
     push bx
-    push dx
     mov ax, 4F05h
-    xor bx, bx
+    xor bx, bx              ; BX=0 = write window A, DX = bank number
     int 10h
-    pop dx
     pop bx
     pop ax
     ret
@@ -2262,6 +2424,11 @@ jingle_notes:
 
 file_welcome:     db 'WELCOME.BMP', 0
 file_gamemode:    db 'GAMEMOD.BMP', 0
+file_2p_p1ready:  db '2P-PLAYER1.BMP', 0
+file_2p_p2ready:  db '2P-PLAYER2.BMP', 0
+file_2p_p1wins:   db '2P-P1WIN.BMP', 0
+file_2p_p2wins:   db '2P-P2WIN.BMP', 0
+file_2p_draw:     db '2P-DRAW.BMP', 0
 file_leaderboard: db 'LEADERBD.BMP', 0
 file_login1:      db 'LOGIN1.BMP', 0
 file_login2:      db 'LOGIN2.BMP', 0
@@ -2356,6 +2523,11 @@ p2_len:           db 0
 active_field:     db 0
 game_mode:        db 0    ; 1 = single player, 2 = two player
 difficulty:       db 0    ; 1 = Baby Bee, 2 = Young Bee, 3 = Big Bee
+current_player:   db 0    ; 2P mode: 0 = Player 1's turn, 1 = Player 2's turn
+p1_score:         dw 0    ; 2P mode: Player 1 saved score
+p2_score:         dw 0    ; 2P mode: Player 2 saved score
+p1_correct:       db 0    ; 2P mode: Player 1 saved correct count
+p2_correct:       db 0    ; 2P mode: Player 2 saved correct count
 sn_byte:          db 0    ; scratch byte for save_names writes
 hud_color:        db 0    ; scratch for HUD drawing color
 cur_max_hearts:   db 3    ; hearts for current round (set by start_game)
@@ -2379,6 +2551,7 @@ lb_col_x:     dw 0                   ; current column x for drawing
 
 ; =============================================================================
 ; 8x8 BITMAP FONT  ASCII 32-127  (96 glyphs x 8 bytes)
+; Classic VGA BIOS font (CP437) - proven readable at 8x8
 ; =============================================================================
 font_data:
 ; 32 space
@@ -2418,7 +2591,7 @@ db 07Ch,0C6h,0CEh,0D6h,0E6h,0C6h,07Ch,000h
 ; 49 1
 db 018h,038h,018h,018h,018h,018h,07Eh,000h
 ; 50 2
-db 07Ch,0C6h,006h,01Ch,030h,060h,0FEh,000h
+db 07Ch,0C6h,006h,01Ch,030h,066h,0FEh,000h
 ; 51 3
 db 07Ch,0C6h,006h,03Ch,006h,0C6h,07Ch,000h
 ; 52 4
@@ -2446,7 +2619,7 @@ db 060h,030h,018h,00Ch,018h,030h,060h,000h
 ; 63 ?
 db 07Ch,0C6h,00Ch,018h,018h,000h,018h,000h
 ; 64 @
-db 07Ch,0C6h,0DEh,0DEh,0DEh,0C0h,07Ch,000h
+db 07Ch,0C6h,0DEh,0DEh,0DEh,0C0h,078h,000h
 ; 65 A
 db 038h,06Ch,0C6h,0FEh,0C6h,0C6h,0C6h,000h
 ; 66 B
@@ -2501,7 +2674,7 @@ db 066h,066h,066h,03Ch,018h,018h,03Ch,000h
 db 0FEh,0C6h,08Ch,018h,032h,066h,0FEh,000h
 ; 91 [
 db 03Ch,030h,030h,030h,030h,030h,03Ch,000h
-; 92 backslash
+; 92 \
 db 0C0h,060h,030h,018h,00Ch,006h,002h,000h
 ; 93 ]
 db 03Ch,00Ch,00Ch,00Ch,00Ch,00Ch,03Ch,000h
