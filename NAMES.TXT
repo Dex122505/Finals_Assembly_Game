@@ -1,9 +1,0 @@
-1,Christian,,1,50
-1,Dex,,1,0
-1,Ew,,2,20
-1,Lebron,,3,30
-1,JAMES,,3,20
-2,JAMES,NIGGA,2,50
-2,JAMES,NIGGA,2,30
-1,JAMESSS,,2,50
-1,JAMESSS,,1,50
