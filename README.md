@@ -42,7 +42,18 @@ Contains the core Assembly language source code and runtime files:
 
 ## 👥 Contributors
 
-- **Dex122505** — Project Lead / Developer
+| Name | Task(s) |
+| :--- | :--- |
+| **Capus, Christian Dexthere E.** | Leader, Programmer |
+| **Barrieta, Raychel G.** | UI/UX Designer |
+| **Blanche, Nheil Jewel F.** | Programmer |
+| **Bonifacio, James Craven C.** | Sounds, Programmer |
+| **De Vera, Ray** | Documentation |
+| **Garcia, John Devonaire L.** | Documentation, Brochure |
+| **Hernandez, John Bennydict R.** | Programmer |
+| **Marquez, Antonio Miguel D.** | Documentation, Booth Design |
+| **Pambid, Lemony Eve R.** | UI/UX Designer |
+| **Simon, Lance Aldwin M.** | UI/UX Designer, Documentation |
 
 ---
 
