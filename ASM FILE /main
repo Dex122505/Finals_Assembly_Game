@@ -1,0 +1,2876 @@
+bits 16
+org 100h
+
+; =============================================================================
+; CONSTANTS  (screen pixel coords; BMP row-0 = top of screen as code writes it)
+; =============================================================================
+
+; LOGIN1 input strip: solid yellow rows y=291-323, x=174-465
+L1_BOX_CLR  equ 291          ; first row to clear
+L1_BOX_H    equ 33           ; rows to clear (291..323 inclusive)
+L1_BOX_X    equ 174          ; left edge of strip
+L1_BOX_W    equ 292          ; 465-174+1
+L1_FILL     equ 16           ; palette index: (255,243,156) yellow
+L1_TEXT_X   equ 179          ; text draw start x (5px inside left edge)
+L1_TEXT_Y   equ 303          ; vertically centred  (291 + (33-8)/2 = 303)
+
+; LOGIN2 player-1 yellow: exact coords derived from BMP palette scan
+; BMP is bottom-up: PIL y=162-191 -> screen y=288-317
+L2_P1_BOX_CLR  equ 288          ; screen y start (479-191=288)
+L2_P1_BOX_H    equ 30           ; 288..317 inclusive
+L2_P1_BOX_X    equ 136          ; left edge (confirmed from BMP)
+L2_P1_BOX_W    equ 169          ; 304-136+1
+L2_P1_FILL     equ 19           ; palette index: (255,243,156) yellow
+L2_P1_TEXT_X   equ 141          ; 5px inside left edge
+L2_P1_TEXT_Y   equ 299          ; 288 + (30-8)/2 = 299
+
+; LOGIN2 player-2 blue: exact coords derived from BMP palette scan
+; BMP is bottom-up: PIL y=162-191 -> screen y=288-317
+L2_P2_BOX_CLR  equ 288
+L2_P2_BOX_H    equ 30
+L2_P2_BOX_X    equ 336          ; left edge (confirmed from BMP)
+L2_P2_BOX_W    equ 169          ; 504-336+1
+L2_P2_FILL     equ 15           ; palette index: (229,252,255) light blue
+L2_P2_TEXT_X   equ 341          ; 5px inside left edge
+L2_P2_TEXT_Y   equ 299
+
+TEXT_COLOR  equ 241           ; (103,63,21) dark brown - correct index from palette
+MAX_NAME    equ 32
+
+; =============================================================================
+section .text
+start:
+    push cs
+    pop ds
+    call set_vesa_640x480
+    push cs
+    pop ds
+    mov dx, file_welcome
+    call load_bmp_640x480
+    ; Start WELCOME music (homepage through how-to-play)
+    call imf_stop
+    mov  si, file_imf_welcome
+    call imf_start
+
+wait_welcome:
+    mov ah, 01h
+    int 16h
+    jz  wait_welcome
+    mov ah, 00h
+    int 16h
+    cmp al, 'P'
+    je  show_gamemode
+    cmp al, 'p'
+    je  show_gamemode
+    cmp al, 'L'
+    je  show_leaderboard
+    cmp al, 'l'
+    je  show_leaderboard
+    cmp al, 27
+    je  exit_program
+    jmp wait_welcome
+
+; -----------------------------------------------------------------------------
+show_gamemode:
+    push cs
+    pop ds
+    mov dx, file_gamemode
+    call load_bmp_640x480
+
+wait_gamemode:
+    mov ah, 00h
+    int 16h
+    cmp al, '1'
+    je  show_login1
+    cmp al, '2'
+    je  show_login2
+    cmp al, 27
+    je  start
+    jmp wait_gamemode
+
+; =============================================================================
+; LOGIN 1  -  single player name entry
+; =============================================================================
+show_login1:
+    push cs
+    pop ds
+    mov dx, file_login1
+    call load_bmp_640x480
+
+    ; clear name buffer (es must equal ds for stosb in .COM)
+    push cs
+    pop es
+    mov di, player1_name
+    mov cx, MAX_NAME+1
+    xor al, al
+    rep stosb
+    mov byte [p1_len], 0
+
+wait_login1:
+    mov ah, 00h
+    int 16h                   ; AL = ASCII, AH = scan code
+
+    cmp al, 27
+    je  show_gamemode
+    cmp al, 13
+    je  login1_done
+
+    ; Backspace: check AL=8 (ASCII) OR AH=0Eh (scan code 14)
+    cmp al, 8
+    je  login1_bs
+    cmp ah, 0Eh
+    je  login1_bs
+
+    ; printable?
+    cmp al, 32
+    jb  wait_login1
+    cmp byte [p1_len], MAX_NAME
+    jae wait_login1
+
+    ; convert lowercase to uppercase before storing
+    cmp al, 'a'
+    jb  .l1_store
+    cmp al, 'z'
+    ja  .l1_store
+    sub al, 32              ; to uppercase
+.l1_store:
+    ; store typed character at player1_name[p1_len]
+    mov bl, [p1_len]
+    xor bh, bh
+    mov [player1_name + bx], al
+    inc byte [p1_len]
+    call redraw_login1
+    jmp wait_login1
+
+login1_bs:
+    cmp byte [p1_len], 0
+    je  wait_login1
+    dec byte [p1_len]
+    mov bl, [p1_len]
+    xor bh, bh
+    mov byte [player1_name + bx], 0
+    call redraw_login1
+    jmp wait_login1
+
+login1_done:
+    cmp byte [p1_len], 0     ; require at least 1 character
+    je  wait_login1
+    mov byte [game_mode], 1  ; single player
+    call save_names          ; persist names to NAMES.DAT
+    jmp show_difficulty
+
+; -- redraw LOGIN1 input box --------------------------------------------------
+; Clears the strip then redraws every char + cursor.
+; Preserves all registers.
+redraw_login1:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    ; 1) clear the strip
+    mov dx, L1_BOX_CLR
+    mov cx, L1_BOX_H
+.cl1:
+    push cx
+    push dx
+    mov bx, L1_BOX_X
+    mov cx, L1_BOX_W
+    mov al, L1_FILL
+    call fill_hline
+    pop dx
+    pop cx
+    inc dx
+    loop .cl1
+
+    ; 2) draw characters
+    mov si, player1_name
+    mov bx, L1_TEXT_X
+    mov dx, L1_TEXT_Y
+.dr1:
+    mov al, [si]
+    or  al, al
+    jz  .dr1_done
+    call draw_char      ; draws glyph, advances bx by 8
+    inc si
+    jmp .dr1
+.dr1_done:
+
+    ; 3) draw cursor (2-px wide vertical bar)
+    mov al, TEXT_COLOR
+    mov cx, 2
+.cur1_col:
+    push cx
+    mov di, L1_TEXT_Y
+    mov cx, 8
+.cur1_px:
+    call plot_pixel     ; (bx, di, al)
+    inc di
+    loop .cur1_px
+    inc bx
+    pop cx
+    loop .cur1_col
+
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; =============================================================================
+; LOGIN 2  -  two-player name entry
+; active_field: 0 = player1, 1 = player2
+; =============================================================================
+show_login2:
+    push cs
+    pop ds
+    mov dx, file_login2
+    call load_bmp_640x480
+
+    ; initialize mouse driver
+    mov ax, 0000h
+    int 33h                 ; reset mouse, AX=FFFFh if driver present
+    ; set mouse position range to match 640x480 screen
+    mov ax, 0007h           ; set horizontal range
+    mov cx, 0
+    mov dx, 639
+    int 33h
+    mov ax, 0008h           ; set vertical range
+    mov cx, 0
+    mov dx, 479
+    int 33h
+
+    push cs
+    pop es
+    mov di, player1_name
+    mov cx, MAX_NAME+1
+    xor al, al
+    rep stosb
+    mov di, player2_name
+    mov cx, MAX_NAME+1
+    xor al, al
+    rep stosb
+    mov byte [p1_len], 0
+    mov byte [p2_len], 0
+    mov byte [active_field], 0
+
+wait_login2:
+    ; --- check mouse button (INT 33h AX=0003h) ---
+    ; Returns: BX=button state (bit0=left), CX=x, DX=y
+    mov ax, 0003h
+    int 33h
+    test bx, 1              ; left button pressed?
+    jz  .no_click
+
+    ; left button is down - check which box was clicked
+    ; P1 box: x=136-304, y=288-317
+    cmp cx, 136
+    jb  .no_click
+    cmp cx, 304
+    ja  .check_p2_click
+    cmp dx, 288
+    jb  .no_click
+    cmp dx, 317
+    ja  .no_click
+    ; clicked inside P1 box
+    mov byte [active_field], 0
+    call redraw_login2
+    ; wait for button release to avoid repeat
+.wait_release1:
+    mov ax, 0003h
+    int 33h
+    test bx, 1
+    jnz .wait_release1
+    jmp wait_login2
+
+.check_p2_click:
+    ; P2 box: x=336-504, y=288-317
+    cmp cx, 336
+    jb  .no_click
+    cmp cx, 504
+    ja  .no_click
+    cmp dx, 288
+    jb  .no_click
+    cmp dx, 317
+    ja  .no_click
+    ; clicked inside P2 box
+    mov byte [active_field], 1
+    call redraw_login2
+    ; wait for button release
+.wait_release2:
+    mov ax, 0003h
+    int 33h
+    test bx, 1
+    jnz .wait_release2
+    jmp wait_login2
+
+.no_click:
+    ; --- check keyboard (non-blocking: AH=01h tests if key waiting) ---
+    mov ah, 01h
+    int 16h
+    jz  wait_login2         ; no key ready, loop back to check mouse
+
+    ; key is ready - consume it
+    mov ah, 00h
+    int 16h
+
+    cmp al, 27
+    je  show_gamemode
+    cmp al, 13
+    je  login2_enter
+    cmp al, 9
+    je  login2_tab
+    cmp al, 8
+    je  login2_bs2
+    cmp ah, 0Eh
+    je  login2_bs2
+
+    cmp al, 32
+    jb  wait_login2
+
+    ; convert lowercase to uppercase
+    cmp al, 'a'
+    jb  .l2_store
+    cmp al, 'z'
+    ja  .l2_store
+    sub al, 32
+.l2_store:
+    cmp byte [active_field], 0
+    je  login2_add_p1
+
+    ; add to player2
+    cmp byte [p2_len], MAX_NAME
+    jae wait_login2
+    mov bl, [p2_len]
+    xor bh, bh
+    mov [player2_name + bx], al
+    inc byte [p2_len]
+    call redraw_login2
+    jmp wait_login2
+
+login2_add_p1:
+    cmp byte [p1_len], MAX_NAME
+    jae wait_login2
+    mov bl, [p1_len]
+    xor bh, bh
+    mov [player1_name + bx], al
+    inc byte [p1_len]
+    call redraw_login2
+    jmp wait_login2
+
+login2_bs2:
+    cmp byte [active_field], 0
+    jne login2_bs2_p2
+    cmp byte [p1_len], 0
+    je  wait_login2
+    dec byte [p1_len]
+    mov bl, [p1_len]
+    xor bh, bh
+    mov byte [player1_name + bx], 0
+    call redraw_login2
+    jmp wait_login2
+login2_bs2_p2:
+    cmp byte [p2_len], 0
+    je  wait_login2
+    dec byte [p2_len]
+    mov bl, [p2_len]
+    xor bh, bh
+    mov byte [player2_name + bx], 0
+    call redraw_login2
+    jmp wait_login2
+
+login2_tab:
+    xor byte [active_field], 1
+    call redraw_login2
+    jmp wait_login2
+
+login2_enter:
+    cmp byte [active_field], 0
+    jne login2_enter_p2
+    cmp byte [p1_len], 0
+    je  wait_login2
+    mov byte [active_field], 1
+    call redraw_login2
+    jmp wait_login2
+login2_enter_p2:
+    cmp byte [p1_len], 0
+    je  wait_login2
+    cmp byte [p2_len], 0
+    je  wait_login2
+    mov byte [game_mode], 2  ; two player
+    mov byte [current_player], 0  ; always start with Player 1
+    mov word [p1_score], 0
+    mov word [p2_score], 0
+    call save_names          ; persist names to NAMES.DAT
+    jmp show_difficulty
+
+; -- redraw LOGIN2 both input boxes -------------------------------------------
+redraw_login2:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    ; clear + draw player-1 yellow box
+    mov dx, L2_P1_BOX_CLR
+    mov cx, L2_P1_BOX_H
+.cl2p1:
+    push cx
+    push dx
+    mov bx, L2_P1_BOX_X
+    mov cx, L2_P1_BOX_W
+    mov al, L2_P1_FILL
+    call fill_hline
+    pop dx
+    pop cx
+    inc dx
+    loop .cl2p1
+
+    mov si, player1_name
+    mov bx, L2_P1_TEXT_X
+    mov dx, L2_P1_TEXT_Y
+.drp1:
+    mov al, [si]
+    or  al, al
+    jz  .drp1_done
+    call draw_char
+    inc si
+    jmp .drp1
+.drp1_done:
+    ; cursor on p1 if active
+    cmp byte [active_field], 0
+    jne .no_cur_p1
+    mov al, TEXT_COLOR
+    mov cx, 2
+.cur2p1:
+    push cx
+    mov di, L2_P1_TEXT_Y
+    mov cx, 8
+.cur2p1_px:
+    call plot_pixel
+    inc di
+    loop .cur2p1_px
+    inc bx
+    pop cx
+    loop .cur2p1
+.no_cur_p1:
+
+    ; clear + draw player-2 blue box
+    mov dx, L2_P2_BOX_CLR
+    mov cx, L2_P2_BOX_H
+.cl2p2:
+    push cx
+    push dx
+    mov bx, L2_P2_BOX_X
+    mov cx, L2_P2_BOX_W
+    mov al, L2_P2_FILL
+    call fill_hline
+    pop dx
+    pop cx
+    inc dx
+    loop .cl2p2
+
+    mov si, player2_name
+    mov bx, L2_P2_TEXT_X
+    mov dx, L2_P2_TEXT_Y
+.drp2:
+    mov al, [si]
+    or  al, al
+    jz  .drp2_done
+    call draw_char
+    inc si
+    jmp .drp2
+.drp2_done:
+    ; cursor on p2 if active
+    cmp byte [active_field], 1
+    jne .no_cur_p2
+    mov al, TEXT_COLOR
+    mov cx, 2
+.cur2p2:
+    push cx
+    mov di, L2_P2_TEXT_Y
+    mov cx, 8
+.cur2p2_px:
+    call plot_pixel
+    inc di
+    loop .cur2p2_px
+    inc bx
+    pop cx
+    loop .cur2p2
+.no_cur_p2:
+
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; =============================================================================
+; DIFFICULTY SELECT  -  shown after login (both modes)
+; =============================================================================
+show_difficulty:
+    push cs
+    pop ds
+    mov dx, file_letsplay
+    call load_bmp_640x480
+
+wait_difficulty:
+    mov ah, 00h
+    int 16h
+    cmp al, '1'
+    je  diff_baby
+    cmp al, '2'
+    je  diff_young
+    cmp al, '3'
+    je  diff_big
+    cmp al, 27
+    je  show_gamemode        ; ESC goes back to mode select
+    jmp wait_difficulty
+
+diff_baby:
+    mov byte [difficulty], 1
+    jmp show_howtoplay
+
+diff_young:
+    mov byte [difficulty], 2
+    jmp show_howtoplay
+
+diff_big:
+    mov byte [difficulty], 3
+    jmp show_howtoplay
+
+; =============================================================================
+; HOW TO PLAY  -  shown after difficulty is selected
+; =============================================================================
+show_howtoplay:
+    push cs
+    pop ds
+    mov dx, file_howtoplay
+    call load_bmp_640x480
+
+wait_howtoplay:
+    mov ah, 00h
+    int 16h
+    cmp al, 27
+    je  show_difficulty      ; ESC goes back to difficulty select
+    cmp al, 13
+    je  show_intro           ; Enter goes to intro page
+    jmp wait_howtoplay
+
+; =============================================================================
+; INTRO PAGE  -  shown after how to play
+; =============================================================================
+show_intro:
+    push cs
+    pop ds
+    mov dx, file_intro
+    call load_bmp_640x480
+
+wait_intro:
+    mov ah, 00h
+    int 16h
+    cmp al, 27
+    je  show_howtoplay       ; ESC goes back to how to play
+    cmp al, 13
+    je  start_game           ; Enter proceeds to game
+    jmp wait_intro
+
+; =============================================================================
+; GAME ENGINE  -  Easy mode (Baby Bee): 3 questions, 5 hearts, 2 choices
+; HUD strip: screen y=0-59 (cyan background drawn by BMP)
+; Hearts drawn at y=20, Score at y=20 right side, Q# counter middle
+; =============================================================================
+
+; Heart colors (palette indices in 256-color mode)
+; We use fill_hline to draw solid blocks for hearts
+; Red = alive heart, colour 4 (standard VGA red in most palettes)
+; Grey = lost heart, colour 8
+
+HEART_X1    equ 15          ; x of first heart left edge
+HEART_GAP   equ 24          ; spacing between hearts (px)
+HEART_SIZE  equ 16          ; width and height of each heart block
+HEART_Y     equ 20          ; y of heart row
+SCORE_X     equ 490         ; x of score display
+SCORE_Y     equ 20          ; y of score
+QN_X        equ 290         ; x of Q counter
+QN_Y        equ 20          ; y of Q counter
+HUD_CLR     equ 60          ; height of HUD rows to clear (screen y 0-59)
+
+MAX_HEARTS  equ 10
+TOTAL_Q_E   equ 10          ; questions picked per game (all 10)
+
+; question correct answers: 1=press1, 2=press2
+; Q_CI_M: circle   -> answer=2
+; Q_TR_M: triangle -> answer=2
+; Q_ST_M: star     -> answer=1
+
+start_game:
+    push cs
+    pop  ds
+    ; Start gameplay music based on mode (1P or 2P)
+    call imf_stop
+    cmp  byte [game_mode], 2
+    je   .sg_music_2p
+    mov  si, file_imf_1p
+    jmp  .sg_music_play
+.sg_music_2p:
+    mov  si, file_imf_2p
+.sg_music_play:
+    call imf_start
+    ; branch on difficulty: 2 = Young Bee (medium), 3 = Big Bee (hard)
+    cmp  byte [difficulty], 2
+    je   start_game_med
+    cmp  byte [difficulty], 3
+    je   start_game_hard
+
+    ; ---- Easy / Baby Bee ----
+    mov  byte [cur_max_hearts], MAX_HEARTS
+    mov  byte [cur_total_q],    TOTAL_Q_E
+    mov  word [cur_bmp_table],  q_bmp_table
+    mov  word [cur_ans_table],  q_ans_table
+    mov  byte [hearts],         MAX_HEARTS
+    mov  word [game_score],     0
+    mov  byte [q_num],          0
+    mov  byte [correct_count],  0
+
+    ; --- 2P: show player-ready splash before starting ---
+    cmp  byte [game_mode], 2
+    jne  game_loop
+    cmp  byte [current_player], 0
+    je   .sg_show_p1
+    ; Player 2's turn
+    push cs
+    pop  ds
+    mov  dx, file_2p_p2ready
+    call load_bmp_640x480
+    mov  ah, 00h
+    int  16h                 ; wait for any key
+    jmp  game_loop
+.sg_show_p1:
+    push cs
+    pop  ds
+    mov  dx, file_2p_p1ready
+    call load_bmp_640x480
+    mov  ah, 00h
+    int  16h                 ; wait for any key before starting
+
+game_loop:
+    push cs
+    pop  ds
+    cmp  byte [hearts], 0
+    je   .go_gameover
+    mov  al, [cur_total_q]
+    cmp  byte [q_num], al
+    jae  .go_finish
+    jmp  .gl_load
+
+.go_gameover:
+    jmp  game_over_screen
+.go_finish:
+    jmp  game_finish
+
+.gl_load:
+    ; load question BMP (table pointer set by start_game variant)
+    xor  bx, bx
+    mov  bl, [q_num]
+    shl  bx, 1
+    mov  si, [cur_bmp_table]
+    mov  dx, [si + bx]
+    call load_bmp_640x480
+
+    ; force palette slots 4=red, 15=light grey into VGA DAC
+    ; so hearts are always visible regardless of BMP palette
+    call set_heart_colors
+
+    ; overlay HUD
+    call draw_hud
+
+wait_answer:
+    mov  ah, 00h
+    int  16h
+    cmp  al, 27
+    je   start
+    cmp  al, '1'
+    je   .check1
+    cmp  al, '2'
+    je   .check2
+    cmp  al, '3'
+    je   .check3
+    cmp  al, '4'
+    je   .check4
+    jmp  wait_answer
+
+.check1:
+    xor  bx, bx
+    mov  bl, [q_num]
+    mov  si, [cur_ans_table]
+    mov  al, [si + bx]
+    cmp  al, 1
+    je   .do_correct
+    jmp  .do_wrong
+
+.check2:
+    xor  bx, bx
+    mov  bl, [q_num]
+    mov  si, [cur_ans_table]
+    mov  al, [si + bx]
+    cmp  al, 2
+    je   .do_correct
+    jmp  .do_wrong
+
+.check3:
+    xor  bx, bx
+    mov  bl, [q_num]
+    mov  si, [cur_ans_table]
+    mov  al, [si + bx]
+    cmp  al, 3
+    je   .do_correct
+    jmp  .do_wrong
+
+.check4:
+    xor  bx, bx
+    mov  bl, [q_num]
+    mov  si, [cur_ans_table]
+    mov  al, [si + bx]
+    cmp  al, 4
+    je   .do_correct
+    jmp  .do_wrong
+
+.do_correct:
+    push cs
+    pop  ds
+    inc  byte [correct_count]
+    add  word [game_score], 10
+    inc  byte [q_num]
+    call draw_hud            ; update score on screen immediately
+    jmp  game_loop
+
+.do_wrong:
+    push cs
+    pop  ds
+    dec  byte [hearts]
+    inc  byte [q_num]
+    call draw_hud            ; show lost heart immediately
+    jmp  game_loop
+
+; =============================================================================
+; GAME ENGINE  -  Medium mode (Young Bee): 5 questions, 5 hearts, 2 choices
+; =============================================================================
+MAX_HEARTS_MED  equ 10
+TOTAL_Q_MED     equ 10
+
+start_game_med:
+    push cs
+    pop  ds
+    mov  byte [cur_max_hearts], MAX_HEARTS_MED
+    mov  byte [cur_total_q],    TOTAL_Q_MED
+    mov  word [cur_bmp_table],  q_bmp_table_med
+    mov  word [cur_ans_table],  q_ans_table_med
+    mov  byte [hearts],         MAX_HEARTS_MED
+    mov  word [game_score],     0
+    mov  byte [q_num],          0
+    mov  byte [correct_count],  0
+
+    ; --- 2P: show player-ready splash before starting ---
+    cmp  byte [game_mode], 2
+    jne  game_loop
+    cmp  byte [current_player], 0
+    je   .sgm_show_p1
+    push cs
+    pop  ds
+    mov  dx, file_2p_p2ready
+    call load_bmp_640x480
+    mov  ah, 00h
+    int  16h
+    jmp  game_loop
+.sgm_show_p1:
+    push cs
+    pop  ds
+    mov  dx, file_2p_p1ready
+    call load_bmp_640x480
+    mov  ah, 00h
+    int  16h
+    jmp  game_loop
+
+; =============================================================================
+; GAME ENGINE  -  Hard mode (Big Bee): 5 questions, 3 hearts, 4 choices
+; =============================================================================
+MAX_HEARTS_HARD equ 10
+TOTAL_Q_HARD    equ 10
+
+start_game_hard:
+    push cs
+    pop  ds
+    mov  byte [cur_max_hearts], MAX_HEARTS_HARD
+    mov  byte [cur_total_q],    TOTAL_Q_HARD
+    mov  word [cur_bmp_table],  q_bmp_table_hard
+    mov  word [cur_ans_table],  q_ans_table_hard
+    mov  byte [hearts],         MAX_HEARTS_HARD
+    mov  word [game_score],     0
+    mov  byte [q_num],          0
+    mov  byte [correct_count],  0
+
+    ; --- 2P: show player-ready splash before starting ---
+    cmp  byte [game_mode], 2
+    jne  game_loop
+    cmp  byte [current_player], 0
+    je   .sgh_show_p1
+    push cs
+    pop  ds
+    mov  dx, file_2p_p2ready
+    call load_bmp_640x480
+    mov  ah, 00h
+    int  16h
+    jmp  game_loop
+.sgh_show_p1:
+    push cs
+    pop  ds
+    mov  dx, file_2p_p1ready
+    call load_bmp_640x480
+    mov  ah, 00h
+    int  16h
+    jmp  game_loop
+
+; ---------------------------------------------------------------------------
+; ---------------------------------------------------------------------------
+game_finish:
+    push cs
+    pop  ds
+
+    ; --- 2P mode: handle turn handoff or winner reveal ---
+    cmp  byte [game_mode], 2
+    jne  .gf_single
+
+    cmp  byte [current_player], 0
+    jne  .gf_p2_done
+
+    ; --- P1 just finished: save results, start P2's turn ---
+    mov  ax, [game_score]
+    mov  [p1_score], ax
+    mov  al, [correct_count]
+    mov  [p1_correct], al
+    mov  byte [current_player], 1
+    jmp  start_game           ; replay same difficulty for P2
+
+.gf_p2_done:
+    ; --- P2 just finished: save P2 results, show winner ---
+    mov  ax, [game_score]
+    mov  [p2_score], ax
+    mov  al, [correct_count]
+    mov  [p2_correct], al
+    call save_score_2p
+    jmp  show_2p_winner
+
+.gf_single:
+    ; --- single-player finish (original logic) ---
+    mov  al, [correct_count]
+    mov  bl, 100
+    mul  bl
+    mov  bl, [cur_total_q]
+    div  bl                  ; al = percent correct
+
+    cmp  al, 100
+    je   .gf_perfect
+    cmp  al, 60
+    jae  .gf_good
+    cmp  al, 30
+    jae  .gf_okay
+    jmp  .gf_try
+
+.gf_perfect: mov dx, file_perfect  
+    jmp .gf_show
+.gf_good:    mov dx, file_goodjob  
+    jmp .gf_show
+.gf_okay:    mov dx, file_okay     
+    jmp .gf_show
+.gf_try:     mov dx, file_tryagain
+
+.gf_show:
+    call imf_stop
+    mov  si, file_imf_end
+    call imf_start
+    call load_bmp_640x480
+    call save_score
+    call delay_2s
+    jmp  show_leaderboard
+
+; ---------------------------------------------------------------------------
+game_over_screen:
+    push cs
+    pop  ds
+
+    ; --- 2P mode: game-over mid-turn ---
+    cmp  byte [game_mode], 2
+    jne  .go_single
+
+    cmp  byte [current_player], 0
+    jne  .go_p2_done
+
+    ; P1 ran out of hearts: score is whatever they earned, hand to P2
+    mov  ax, [game_score]
+    mov  [p1_score], ax
+    mov  al, [correct_count]
+    mov  [p1_correct], al
+    mov  byte [current_player], 1
+    jmp  start_game           ; P2 plays same round
+
+.go_p2_done:
+    ; P2 ran out of hearts: finalize and show winner
+    mov  ax, [game_score]
+    mov  [p2_score], ax
+    mov  al, [correct_count]
+    mov  [p2_correct], al
+    call save_score_2p
+    jmp  show_2p_winner
+
+.go_single:
+    call imf_stop
+    mov  si, file_imf_end
+    call imf_start
+    mov  dx, file_tryagain
+    call load_bmp_640x480
+    call save_score
+    call delay_2s
+    jmp  show_leaderboard
+
+; ---------------------------------------------------------------------------
+; show_2p_winner  -  compare P1 vs P2 scores and show result
+; ---------------------------------------------------------------------------
+show_2p_winner:
+    push cs
+    pop  ds
+    ; reset current_player for next game
+    mov  byte [current_player], 0
+    ; Play END music
+    call imf_stop
+    mov  si, file_imf_end
+    call imf_start
+
+    mov  ax, [p1_score]
+    mov  bx, [p2_score]
+    cmp  ax, bx
+    ja   .w_p1wins
+    jb   .w_p2wins
+    ; draw
+    mov  dx, file_2p_draw
+    jmp  .w_show
+.w_p1wins:
+    mov  dx, file_2p_p1wins
+    jmp  .w_show
+.w_p2wins:
+    mov  dx, file_2p_p2wins
+.w_show:
+    call load_bmp_640x480
+
+    call delay_2s
+    call delay_2s
+
+wait_2p_winner:
+    mov  ah, 00h
+    int  16h
+    cmp  al, 27
+    je   start
+    cmp  al, 13
+    je   start
+    jmp  wait_2p_winner
+
+; ---------------------------------------------------------------------------
+; save_score_2p  -  save both players' scores for 2P mode
+; Writes two records: one for P1, one for P2
+; ---------------------------------------------------------------------------
+save_score_2p:
+    ; 2P scores are NOT saved to leaderboard - leaderboard is single-player only
+    ret
+
+; ---------------------------------------------------------------------------
+; set_heart_colors  -  force VGA DAC palette entries for HUD hearts + text
+; Index  4 → bright red   (63, 0,  0)  = filled heart
+; Index 15 → light grey   (42, 42, 42) = lost heart
+; Index  0 → pure white   (63, 63, 63) = background clear pixel
+; Index 241 is left as-is (already near-black in question BMPs)
+; ---------------------------------------------------------------------------
+set_heart_colors:
+    push ax
+    push dx
+
+    ; index 4 = bright red
+    mov  dx, 3C8h
+    mov  al, 4
+    out  dx, al
+    mov  dx, 3C9h
+    mov  al, 63
+    out  dx, al
+    xor  al, al
+    out  dx, al
+    out  dx, al
+
+    ; index 15 = mid grey (lost/empty heart)
+    mov  dx, 3C8h
+    mov  al, 15
+    out  dx, al
+    mov  dx, 3C9h
+    mov  al, 38
+    out  dx, al
+    mov  al, 38
+    out  dx, al
+    mov  al, 38
+    out  dx, al
+
+    pop  dx
+    pop  ax
+    ret
+
+; ---------------------------------------------------------------------------
+; draw_hud  -  draws hearts + score + Q counter over HUD area
+; ---------------------------------------------------------------------------
+draw_hud:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push ds
+    push cs
+    pop  ds
+
+    ; ── clear HUD strip (rows 0..HUD_CLR-1) with black (index 0) ───────────
+    ; This erases any hearts the BMP pre-drew so only our dynamic count shows.
+    xor  dx, dx          ; start at row 0
+.dh_clr:
+    cmp  dx, HUD_CLR
+    jae  .dh_clr_done
+    push dx
+    mov  bx, 0           ; x start
+    mov  cx, 640         ; full width
+    mov  al, 0           ; colour 0 (black background for HUD)
+    call fill_hline
+    pop  dx
+    inc  dx
+    jmp  .dh_clr
+.dh_clr_done:
+
+    ; ── draw hearts (count set by cur_max_hearts) ──────────────────────────
+    ; si = heart index
+    ; red (color 4)  if si < [hearts]
+    ; grey (color 15) if si >= [hearts]
+    xor  si, si
+
+.dh_next_heart:
+    xor  ax, ax
+    mov  al, [cur_max_hearts]
+    cmp  si, ax
+    jae  .dh_done_hearts
+
+    ; --- compute x into CX (use CX not BX to avoid confusion) ---
+    ; x = HEART_X1 + si * HEART_GAP
+    ; HEART_GAP=24, HEART_X1=15
+    ; si=0 -> x=15,  si=1 -> x=39,  si=2 -> x=63
+    mov  cx, si
+    mov  ax, HEART_GAP
+    push dx
+    mul  cx               ; AX = si * HEART_GAP, DX trashed
+    pop  dx
+    add  ax, HEART_X1     ; AX = x position
+    mov  bx, ax           ; BX = x (used by fill_hline and draw routines)
+
+    ; --- pick color ---
+    ; NOTE: ax was clobbered by 'mul cx' above, so reload hearts here.
+    mov  al, [hearts]     ; remaining hearts count
+    cmp  si, ax           ; si >= hearts -> lost heart  (si=heart index, al=count)
+    jb   .dh_alive
+    mov  al, 15           ; grey (lost heart)
+    jmp  .dh_drawcolor
+.dh_alive:
+    mov  al, 4            ; red (alive heart)
+
+.dh_drawcolor:
+    ; --- draw heart shape ---
+    ; Store color in ah for safe keeping (fill_hline uses al)
+    mov  ah, al
+
+    ; Top-left bump: x, HEART_Y, 6 wide x 3 tall
+    mov  dx, HEART_Y
+    mov  cx, 6
+    mov  al, ah
+    call fill_hline
+    mov  dx, HEART_Y+1
+    mov  cx, 6
+    mov  al, ah
+    call fill_hline
+    mov  dx, HEART_Y+2
+    mov  cx, 6
+    mov  al, ah
+    call fill_hline
+
+    ; Top-right bump: x+10, HEART_Y, 6 wide x 3 tall
+    add  bx, 10
+    mov  dx, HEART_Y
+    mov  cx, 6
+    mov  al, ah
+    call fill_hline
+    mov  dx, HEART_Y+1
+    mov  cx, 6
+    mov  al, ah
+    call fill_hline
+    mov  dx, HEART_Y+2
+    mov  cx, 6
+    mov  al, ah
+    call fill_hline
+    sub  bx, 10           ; restore to left edge
+
+    ; Full body: x-2, HEART_Y+3, 20 wide x 4 tall
+    sub  bx, 2
+    mov  cx, 20
+    mov  dx, HEART_Y+3
+    mov  al, ah
+    call fill_hline
+    mov  dx, HEART_Y+4
+    mov  al, ah
+    call fill_hline
+    mov  dx, HEART_Y+5
+    mov  al, ah
+    call fill_hline
+    mov  dx, HEART_Y+6
+    mov  al, ah
+    call fill_hline
+
+    ; Narrow: x+4, HEART_Y+7, 12 wide x 2 tall
+    add  bx, 4
+    mov  cx, 12
+    mov  dx, HEART_Y+7
+    mov  al, ah
+    call fill_hline
+    mov  dx, HEART_Y+8
+    mov  al, ah
+    call fill_hline
+
+    ; Tip 1: x+3, HEART_Y+9, 6 wide
+    add  bx, 3
+    mov  cx, 6
+    mov  dx, HEART_Y+9
+    mov  al, ah
+    call fill_hline
+
+    ; Tip 2: x+2, HEART_Y+10, 2 wide
+    add  bx, 2
+    mov  cx, 2
+    mov  dx, HEART_Y+10
+    mov  al, ah
+    call fill_hline
+
+    ; next heart
+    inc  si
+    jmp  .dh_next_heart
+
+.dh_done_hearts:
+
+    ; ── draw score ─────────────────────────────────────────────────────────
+    mov  bx, SCORE_X
+    mov  dx, SCORE_Y
+    mov  al, 'S'
+    call draw_char
+    mov  al, 'C'
+    call draw_char
+    mov  al, ':'
+    call draw_char
+    mov  ax, [game_score]
+    call draw_num_ax
+
+    ; ── draw question counter ───────────────────────────────────────────────
+    mov  bx, QN_X
+    mov  dx, QN_Y
+    mov  al, 'Q'
+    call draw_char
+    mov  al, ':'
+    call draw_char
+    mov  al, [q_num]
+    inc  al               ; 1-based
+    add  al, '0'
+    call draw_char
+    mov  al, '/'
+    call draw_char
+    mov  al, [cur_total_q]
+    add  al, '0'
+    call draw_char
+
+    ; ── 2P: draw current player indicator ──────────────────────────────────
+    cmp  byte [game_mode], 2
+    jne  .dh_no2p
+    mov  bx, 560
+    mov  dx, QN_Y
+    cmp  byte [current_player], 0
+    je   .dh_p1tag
+    mov  al, 'P'
+    call draw_char
+    mov  al, '2'
+    call draw_char
+    jmp  .dh_no2p
+.dh_p1tag:
+    mov  al, 'P'
+    call draw_char
+    mov  al, '1'
+    call draw_char
+.dh_no2p:
+
+    pop  ds
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+
+draw_num_ax:
+    push ax
+    push cx
+    push dx
+    push si
+    ; build decimal string backwards in num_buf
+    push cs
+    pop  ds
+    mov  si, num_buf + 5    ; end of buffer
+    mov  byte [si], 0       ; null term
+    mov  cx, 0              ; digit count
+    cmp  ax, 0
+    jne  .dna_loop
+    dec  si
+    mov  byte [si], '0'
+    inc  cx
+    jmp  .dna_print
+.dna_loop:
+    cmp  ax, 0
+    je   .dna_print
+    push bx
+    mov  bx, 10
+    push dx                 ; save y-coord before div clobbers dx
+    xor  dx, dx
+    div  bx
+    mov  cl, dl             ; save remainder digit
+    pop  dx                 ; restore y-coord
+    pop  bx
+    dec  si
+    add  cl, '0'
+    mov  [si], cl
+    inc  cx
+    jmp  .dna_loop
+.dna_print:
+    ; si points to first digit
+.dna_out:
+    mov  al, [si]
+    or   al, al
+    jz   .dna_done
+    call draw_char
+    inc  si
+    jmp  .dna_out
+.dna_done:
+    pop  si
+    pop  dx
+    pop  cx
+    pop  ax
+    ret
+
+; ---------------------------------------------------------------------------
+; delay_2s  -  waits ~2 seconds using BIOS timer tick (18.2/sec)
+; ---------------------------------------------------------------------------
+delay_2s:
+    push ax
+    push bx
+    push cx
+    push dx
+    mov  ah, 00h
+    int  1Ah
+    ; cx:dx = current ticks
+    add  dx, 37             ; 37 ticks ~ 2.03 seconds
+    adc  cx, 0
+    mov  bx, dx
+    mov  si, cx
+.dl_wait:
+    mov  ah, 00h
+    int  1Ah
+    cmp  cx, si
+    ja   .dl_done
+    jb   .dl_wait
+    cmp  dx, bx
+    jb   .dl_wait
+.dl_done:
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+; ---------------------------------------------------------------------------
+; save_score - appends complete record to NAMES.TXT
+; Format: MODE,P1NAME,P2NAME,DIFF,SCORE\r\n
+; Opens (or creates) NAMES.TXT, seeks to end, writes the full line atomically.
+; ---------------------------------------------------------------------------
+save_score:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push ds
+    push cs
+    pop  ds
+
+    ; open for read/write, create if missing
+    mov  ah, 3Dh
+    mov  al, 02h             ; read+write
+    mov  dx, file_names
+    int  21h
+    jnc  .ss_seek
+    ; file doesn't exist — create it
+    mov  ah, 3Ch
+    xor  cx, cx
+    mov  dx, file_names
+    int  21h
+    jc   .ss_done
+.ss_seek:
+    mov  [filehandle], ax
+    ; seek to end so we always append
+    mov  ah, 42h
+    mov  al, 02h
+    mov  bx, [filehandle]
+    xor  cx, cx
+    xor  dx, dx
+    int  21h
+
+    ; ── write MODE digit ──────────────────────────────────────────────────
+    mov  al, [game_mode]
+    add  al, '0'
+    mov  [sn_byte], al
+    call .ss_wb
+
+    ; ── write comma ───────────────────────────────────────────────────────
+    mov  byte [sn_byte], ','
+    call .ss_wb
+
+    ; ── write P1 name ─────────────────────────────────────────────────────
+    mov  si, player1_name
+.ss_p1:
+    mov  al, [si]
+    or   al, al
+    jz   .ss_p1done
+    mov  [sn_byte], al
+    call .ss_wb
+    inc  si
+    jmp  .ss_p1
+.ss_p1done:
+
+    ; ── write comma ───────────────────────────────────────────────────────
+    mov  byte [sn_byte], ','
+    call .ss_wb
+
+    ; ── write P2 name ─────────────────────────────────────────────────────
+    mov  si, player2_name
+.ss_p2:
+    mov  al, [si]
+    or   al, al
+    jz   .ss_p2done
+    mov  [sn_byte], al
+    call .ss_wb
+    inc  si
+    jmp  .ss_p2
+.ss_p2done:
+
+    ; ── write comma ───────────────────────────────────────────────────────
+    mov  byte [sn_byte], ','
+    call .ss_wb
+
+    ; ── write DIFF digit ──────────────────────────────────────────────────
+    mov  al, [difficulty]
+    add  al, '0'
+    mov  [sn_byte], al
+    call .ss_wb
+
+    ; ── write comma ───────────────────────────────────────────────────────
+    mov  byte [sn_byte], ','
+    call .ss_wb
+
+    ; ── write SCORE digits ────────────────────────────────────────────────
+    mov  ax, [game_score]
+    push cs
+    pop  ds
+    mov  si, num_buf + 5
+    mov  byte [si], 0
+    cmp  ax, 0
+    jne  .ss_digits
+    dec  si
+    mov  byte [si], '0'
+    jmp  .ss_wrnum
+.ss_digits:
+    push bx
+    mov  bx, 10
+.ss_dloop:
+    cmp  ax, 0
+    je   .ss_dloop_done
+    xor  dx, dx
+    div  bx
+    dec  si
+    add  dl, '0'
+    mov  [si], dl
+    jmp  .ss_dloop
+.ss_dloop_done:
+    pop  bx
+.ss_wrnum:
+.ss_wloop:
+    mov  al, [si]
+    or   al, al
+    jz   .ss_wcrlf
+    mov  [sn_byte], al
+    call .ss_wb
+    inc  si
+    jmp  .ss_wloop
+
+    ; ── write CR LF ───────────────────────────────────────────────────────
+.ss_wcrlf:
+    mov  byte [sn_byte], 13
+    call .ss_wb
+    mov  byte [sn_byte], 10
+    call .ss_wb
+
+    ; ── close file ────────────────────────────────────────────────────────
+    mov  ah, 3Eh
+    mov  bx, [filehandle]
+    int  21h
+
+.ss_done:
+    pop  ds
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+    ; ── helper: write one byte from [sn_byte] ─────────────────────────────
+.ss_wb:
+    push ax
+    push cx
+    push dx
+    mov  bx, [filehandle]
+    mov  ah, 40h
+    mov  cx, 1
+    mov  dx, sn_byte
+    int  21h
+    pop  dx
+    pop  cx
+    pop  ax
+    ret
+
+; =============================================================================
+; SAVE NAMES  -  appends one plain-text line to NAMES.TXT
+; Format per line:  MODE,PLAYER1,PLAYER2<CR><LF>
+; Example:          1,Christian,<CR><LF>
+;                   2,Steve,Dale<CR><LF>
+; Easy to read in any text editor and in VIEWREC.
+; =============================================================================
+save_names:
+    ; Record is now written atomically by save_score.
+    ; save_names is kept so existing call sites still assemble.
+    ret
+
+; =============================================================================
+; LEADERBOARD
+; Reads NAMES.TXT, parses records, draws top-5 per difficulty column.
+; Record format (save_names + save_score):
+;   MODE,P1NAME,P2NAME,DIFF,SCORE\r\n
+;   field 0=MODE  1=P1NAME  2=P2NAME  3=DIFF(1/2/3)  4=SCORE
+;
+; Screen layout (from LEADERBD.BMP):
+;   Baby Bee col x=103  Young Bee col x=263  Big Bee col x=423
+;   Row 1 y=238, step 30px each row
+;
+; Board storage: 3 cols x 5 rows, each entry = 2 bytes score + 10 bytes name = 12 bytes
+; =============================================================================
+
+LB_ROWS equ 5
+LB_NLEN equ 10
+LB_ESIZ equ 12          ; 2(score word) + 10(name)
+
+LB_X0   equ 103         ; Baby Bee column x
+LB_X1   equ 263         ; Young Bee column x
+LB_X2   equ 423         ; Big Bee column x
+LB_Y0   equ 198         ; first row y (aligned to '1.' label on LEADERBD.BMP)
+LB_YGAP    equ 30          ; row spacing
+LB_SCORE_X equ 75          ; x offset from col start to score column
+
+show_leaderboard:
+    push cs
+    pop  ds
+    mov  dx, file_leaderboard
+    call load_bmp_640x480
+
+    ; Fix palette index 241 (TEXT_COLOR) to dark brown so draw_char text is
+    ; visible on the leaderboard BMP (its palette may map 241 to background).
+    push ax
+    push dx
+    mov  dx, 3C8h
+    mov  al, 241
+    out  dx, al
+    mov  dx, 3C9h
+    mov  al, 26          ; R=103 >> 2 = 26  (dark brown: r=103,g=63,b=21)
+    out  dx, al
+    mov  al, 15          ; G=63  >> 2 = 15
+    out  dx, al
+    mov  al, 5           ; B=21  >> 2 = 5
+    out  dx, al
+    pop  dx
+    pop  ax
+
+    ; ---- zero board buffer ----
+    push cs
+    pop  ds
+    push cs
+    pop  es
+    mov  di, lb_board
+    mov  cx, 3 * LB_ROWS * LB_ESIZ
+    xor  al, al
+    rep  stosb
+    mov  byte [lb_used+0], 0
+    mov  byte [lb_used+1], 0
+    mov  byte [lb_used+2], 0
+
+    ; ---- open NAMES.TXT ----
+    push cs
+    pop  ds
+    mov  ah, 3Dh
+    mov  al, 00h
+    mov  dx, file_names
+    int  21h
+    jc   .draw              ; no file → show blank board
+
+    mov  [filehandle], ax
+
+    ; ---- parse loop ----
+.rdline:
+    call lb_readline        ; fills lb_rbuf, returns CX=len
+    cmp  cx, 0
+    je   .closefile
+
+    ; SI = lb_rbuf  (set by lb_readline)
+    ; skip field 0 (MODE)
+    call lb_skipfield
+    jc   .rdline
+
+    ; copy field 1 (P1 name) into lb_tmp_name
+    push cs
+    pop  ds
+    mov  di, lb_tmp_name
+    mov  cx, LB_NLEN
+    call lb_copyfield
+    jc   .rdline
+
+    ; skip field 2 (P2 name)
+    call lb_skipfield
+    jc   .rdline
+
+    ; read field 3: difficulty digit (1, 2, or 3)
+    mov  al, [si]
+    sub  al, '0'
+    cmp  al, 1
+    jb   .rdline
+    cmp  al, 3
+    ja   .rdline
+    mov  [lb_tmp_diff], al
+    call lb_skipfield
+    jc   .rdline
+
+    ; read field 4: score number
+    call lb_parsenum        ; AX = score
+    mov  [lb_tmp_score], ax
+
+    ; insert into correct column (sorted, top-5 by score desc)
+    call lb_insert
+
+    jmp  .rdline
+
+.closefile:
+    mov  ah, 3Eh
+    mov  bx, [filehandle]
+    int  21h
+
+    ; ---- draw each column ----
+.draw:
+    push cs
+    pop  ds
+
+    ; Column 0 (Baby Bee)
+    mov  bx, LB_X0
+    mov  si, lb_board + 0 * LB_ROWS * LB_ESIZ
+    mov  al, [lb_used+0]
+    call lb_drawcol
+
+    ; Column 1 (Young Bee)
+    mov  bx, LB_X1
+    mov  si, lb_board + 1 * LB_ROWS * LB_ESIZ
+    mov  al, [lb_used+1]
+    call lb_drawcol
+
+    ; Column 2 (Big Bee)
+    mov  bx, LB_X2
+    mov  si, lb_board + 2 * LB_ROWS * LB_ESIZ
+    mov  al, [lb_used+2]
+    call lb_drawcol
+
+wait_leaderboard:
+    mov  ah, 00h
+    int  16h
+    cmp  al, 27
+    je   ret_home_from_lb   ; ESC -> home
+    cmp  al, 13
+    je   ret_home_from_lb   ; Enter -> home
+    jmp  wait_leaderboard
+
+ret_home_from_lb:
+    jmp  start
+
+; ---------------------------------------------------------------------------
+; lb_drawcol  -  draw one leaderboard column
+; IN:  BX = column x,  SI = pointer to first entry in column,  AL = count
+; Preserves everything
+lb_drawcol:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push ds
+    push cs
+    pop  ds
+
+    ; save column x for row resets
+    mov  [lb_col_x], bx
+
+    xor  ah, ah
+    mov  cx, ax             ; cx = entry count
+    xor  di, di             ; di = row index
+
+.lcol_loop:
+    cmp  di, cx
+    jae  .lcol_done
+    cmp  di, LB_ROWS
+    jae  .lcol_done
+
+    ; dx = LB_Y0 + di * LB_YGAP
+    push ax
+    mov  ax, di
+    push cx
+    mov  cx, LB_YGAP
+    mul  cx
+    pop  cx
+    add  ax, LB_Y0
+    mov  dx, ax
+    pop  ax
+
+    ; bx = column x (reset each row) + offset to clear pre-drawn "1." on BMP
+    mov  bx, [lb_col_x]
+    add  bx, 14             ; skip past the row number drawn by the BMP
+
+    ; draw name: up to LB_NLEN chars starting at [si+2]
+    ; si currently points to entry base (score word first, then name)
+    push si
+    add  si, 2              ; point past score word to name
+    push cx
+    mov  cx, LB_NLEN
+.lcol_name:
+    mov  al, [si]
+    or   al, al
+    jz   .lcol_name_done
+    call draw_char
+    inc  si
+    dec  cx
+    jnz  .lcol_name
+.lcol_name_done:
+    pop  cx
+    pop  si                 ; si = entry base again
+
+    ; jump BX to fixed score position
+    mov  bx, [lb_col_x]
+    add  bx, LB_SCORE_X
+
+    ; draw score: read word at [si]
+    push ax
+    mov  ax, [si]
+    call draw_num_ax
+    pop  ax
+
+    ; advance to next entry
+    add  si, LB_ESIZ
+    inc  di
+    jmp  .lcol_loop
+
+.lcol_done:
+    pop  ds
+    pop  di
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+; ---------------------------------------------------------------------------
+; lb_insert  -  insert lb_tmp_name/lb_tmp_score/lb_tmp_diff into lb_board
+; Keeps top-5 per column sorted by score descending.
+; Uses: AX BX CX DX SI DI  (all saved/restored)
+lb_insert:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push ds
+    push cs
+    pop  ds
+
+    ; BX = column index (0-based)
+    xor  bh, bh
+    mov  bl, [lb_tmp_diff]
+    dec  bl
+
+    ; DI = column base address
+    mov  ax, bx
+    mov  cx, LB_ROWS * LB_ESIZ
+    mul  cx
+    add  ax, lb_board
+    mov  di, ax
+
+    ; CX = current used count for this column
+    xor  ch, ch
+    mov  cl, [lb_used + bx]
+
+    ; AX = new score to insert
+    mov  ax, [lb_tmp_score]
+
+    ; find first slot whose score < new score (DX = slot index)
+    xor  dx, dx
+.lbi_find:
+    cmp  dx, cx
+    jae  .lbi_doins         ; reached end of used entries → append here
+    ; compare: entry[dx].score vs ax
+    push ax
+    push bx
+    mov  bx, dx
+    push cx
+    mov  cx, LB_ESIZ
+    xchg ax, bx
+    mul  cx                 ; ax = dx * LB_ESIZ  (dx was in bx, now ax after xchg)
+    xchg ax, bx             ; bx = dx*LB_ESIZ, ax = new score
+    pop  cx
+    add  bx, di             ; bx = &entry[dx]
+    cmp  ax, [bx]           ; new score > entry[dx].score?
+    pop  bx
+    pop  ax
+    ja   .lbi_doins         ; yes → insert here
+    inc  dx
+    jmp  .lbi_find
+
+.lbi_doins:
+    ; if dx >= LB_ROWS, no room (score too low for table)
+    cmp  dx, LB_ROWS
+    jae  .lbi_done
+
+    ; shift entries [dx .. min(used,LB_ROWS)-1] down by 1
+    ; number of entries to shift = min(used,LB_ROWS-1) - dx
+    mov  si, cx             ; si = used
+    cmp  si, LB_ROWS
+    jb   .lbi_shok
+    mov  si, LB_ROWS - 1   ; cap so last slot is overwritten
+.lbi_shok:
+    ; shift si-1 → si, si-2 → si-1, ... dx → dx+1
+.lbi_shloop:
+    cmp  si, dx
+    jbe  .lbi_shend
+    ; copy entry[si-1] → entry[si]
+    push ax
+    push bx
+    push cx
+    ; compute src = di + (si-1)*LB_ESIZ
+    mov  ax, si
+    dec  ax
+    mov  cx, LB_ESIZ
+    mul  cx
+    add  ax, di
+    push ax                 ; src addr on stack
+    ; compute dst = di + si*LB_ESIZ
+    mov  ax, si
+    mul  cx
+    add  ax, di
+    mov  bx, ax             ; dst addr in bx
+    pop  ax                 ; src addr in ax
+    ; copy LB_ESIZ bytes
+    push si
+    mov  si, ax
+    mov  cx, LB_ESIZ
+.lbi_cp:
+    mov  al, [si]
+    mov  [bx], al
+    inc  si
+    inc  bx
+    loop .lbi_cp
+    pop  si
+    pop  cx
+    pop  bx
+    pop  ax
+    dec  si
+    jmp  .lbi_shloop
+
+.lbi_shend:
+    ; write new entry at slot dx: addr = di + dx*LB_ESIZ
+    push ax
+    push bx
+    push cx
+    mov  ax, dx
+    mov  cx, LB_ESIZ
+    mul  cx
+    add  ax, di
+    mov  bx, ax             ; bx = &entry[dx]
+
+    ; write score word
+    mov  ax, [lb_tmp_score]
+    mov  [bx], ax
+    add  bx, 2
+
+    ; write name bytes
+    push cs
+    pop  ds
+    mov  si, lb_tmp_name
+    mov  cx, LB_NLEN
+.lbi_wn:
+    mov  al, [si]
+    mov  [bx], al
+    inc  si
+    inc  bx
+    loop .lbi_wn
+
+    pop  cx
+    pop  bx
+    pop  ax
+
+    ; increment used count (cap at LB_ROWS)
+    push cs
+    pop  ds
+    xor  bh, bh
+    mov  bl, [lb_tmp_diff]
+    dec  bl
+    cmp  byte [lb_used + bx], LB_ROWS
+    jae  .lbi_done
+    inc  byte [lb_used + bx]
+
+.lbi_done:
+    pop  ds
+    pop  di
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+; ---------------------------------------------------------------------------
+; lb_readline  -  read one CR/LF-terminated line from [filehandle] into lb_rbuf
+; Returns: SI = lb_rbuf, CX = char count (0 = EOF)
+lb_readline:
+    push ds
+    push cs
+    pop  ds
+    mov  di, lb_rbuf
+    xor  cx, cx
+.lbrl:
+    push cx
+    push di
+    mov  ah, 3Fh
+    mov  bx, [filehandle]
+    mov  dx, di
+    mov  cx, 1
+    int  21h
+    pop  di
+    pop  cx
+    or   ax, ax
+    jz   .lbrl_eof
+    mov  al, [di]
+    cmp  al, 10
+    je   .lbrl_done
+    cmp  al, 13
+    je   .lbrl
+    inc  di
+    inc  cx
+    cmp  cx, 126
+    jb   .lbrl
+.lbrl_done:
+    mov  byte [di], 0
+    mov  si, lb_rbuf
+    pop  ds
+    ret
+.lbrl_eof:
+    ; EOF reached - return whatever is in buffer (CX may be >0 for last line)
+    mov  byte [di], 0
+    mov  si, lb_rbuf
+    ; if CX=0 (truly empty), caller will stop; if CX>0, last line is parsed
+    pop  ds
+    ret
+
+; ---------------------------------------------------------------------------
+; lb_skipfield  -  advance SI past the next comma
+; CF=1 if end-of-string reached with no comma
+lb_skipfield:
+.lbsf:
+    mov  al, [si]
+    or   al, al
+    jz   .lbsf_err
+    inc  si
+    cmp  al, ','
+    jne  .lbsf
+    clc
+    ret
+.lbsf_err:
+    stc
+    ret
+
+; ---------------------------------------------------------------------------
+; lb_copyfield  -  copy field at SI into [DI], max CX chars, null-term
+; Stops at comma or null.  Advances SI past comma.  CF=1 if no comma.
+lb_copyfield:
+    push cx
+.lbcf:
+    mov  al, [si]
+    or   al, al
+    jz   .lbcf_eol
+    inc  si
+    cmp  al, ','
+    je   .lbcf_done
+    jcxz .lbcf             ; no room, keep scanning
+    mov  [di], al
+    inc  di
+    dec  cx
+    jmp  .lbcf
+.lbcf_done:
+    mov  byte [di], 0
+    pop  cx
+    clc
+    ret
+.lbcf_eol:
+    mov  byte [di], 0
+    pop  cx
+    stc
+    ret
+
+; ---------------------------------------------------------------------------
+; lb_parsenum  -  parse decimal number at [SI] into AX.  Advances SI.
+lb_parsenum:
+    xor  ax, ax
+.lbpn:
+    mov  cl, [si]
+    cmp  cl, '0'
+    jb   .lbpn_done
+    cmp  cl, '9'
+    ja   .lbpn_done
+    sub  cl, '0'
+    push cx
+    mov  cx, 10
+    mul  cx
+    pop  cx
+    xor  ch, ch
+    add  ax, cx
+    inc  si
+    jmp  .lbpn
+.lbpn_done:
+    ret
+
+exit_program:
+    call imf_stop
+    mov ax, 0003h
+    int 10h
+    ret
+
+; =============================================================================
+; GRAPHICS PRIMITIVES
+; =============================================================================
+
+; -- plot_pixel ---------------------------------------------------------------
+; IN:  bx=x, di=y, al=colour
+; Preserves ALL registers
+plot_pixel:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push es
+
+    mov cl, al              ; save colour byte
+
+    ; linear address = y * 640 + x
+    mov ax, di              ; ax = y
+    mov si, 640
+    mul si                  ; dx:ax = y*640  (dx = bank, ax = offset)
+    add ax, bx              ; offset += x
+    adc dx, 0               ; carry into bank
+
+    ; select VESA bank (dx = bank number)
+    push ax                 ; save offset
+    push dx
+    push bx
+    mov si, dx              ; bank into si so bx is free for VESA call
+    mov ax, 4F05h
+    xor bx, bx              ; BX=0: set window A
+    mov dx, si              ; DX = bank number
+    int 10h
+    pop bx
+    pop dx
+    pop ax                  ; restore offset into ax
+
+    ; write pixel
+    mov bx, ax              ; bx = offset within 64 KB window
+    mov ax, 0A000h
+    mov es, ax
+    mov al, cl              ; colour
+    mov [es:bx], al
+
+    pop es
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; -- fill_hline ---------------------------------------------------------------
+; Fill cx pixels starting at (bx, dx) with colour al
+; Preserves all registers
+fill_hline:
+    push bx
+    push cx
+    push di
+    mov di, dx
+.fhl:
+    call plot_pixel
+    inc bx
+    loop .fhl
+    pop di
+    pop cx
+    pop bx
+    ret
+
+; =============================================================================
+; FONT ENGINE  -  8x8 bitmap font, one char per call
+; =============================================================================
+
+; char_width: pixels to advance per character (proportional feel with 8px glyphs)
+; We use fixed 8px wide glyphs.
+
+; -- draw_char ----------------------------------------------------------------
+; Draw ASCII char in al at screen position (bx=x, dx=y)
+; On return: bx advanced by 8 (next character x)
+; Preserves: ax, cx, dx, si, di
+draw_char:
+    push ax
+    push cx
+    push si
+    push di
+
+    cmp al, 32
+    jb  .dc_skip
+    cmp al, 127
+    ja  .dc_skip
+
+    sub al, 32              ; 0-based index
+    xor ah, ah
+    mov si, ax
+    shl si, 3               ; * 8 bytes per glyph
+    add si, font_data
+
+    mov di, dx              ; row y
+    mov cx, 8               ; 8 rows
+.dc_row:
+    push cx
+    push bx
+    mov ah, [si]            ; bit pattern for this row
+    mov cx, 8               ; 8 columns
+.dc_col:
+    test ah, 80h
+    jz  .dc_no_px
+    mov al, TEXT_COLOR
+    call plot_pixel
+.dc_no_px:
+    inc bx
+    shl ah, 1
+    loop .dc_col
+    pop bx
+    pop cx
+    inc si
+    inc di
+    loop .dc_row
+
+.dc_skip:
+    add bx, 9              ; 8px glyph + 1px spacing
+    pop di
+    pop si
+    pop cx
+    pop ax
+    ret
+
+; =============================================================================
+; VESA SETUP
+; =============================================================================
+set_vesa_640x480:
+    mov ax, 4F02h
+    mov bx, 0101h
+    int 10h
+    cmp ax, 004Fh
+    je  .done
+    mov ax, 0003h
+    int 10h
+.done:
+    ret
+
+; =============================================================================
+; BMP LOADER  (640x480 8bpp, bottom-up -> written top-of-screen first)
+; =============================================================================
+load_bmp_640x480:
+    cli                         ; block INT 8h (IMF) while DOS file I/O is active
+                                ; (INT 8h handler sets DS=CS mid-call which corrupts DOS reads)
+    mov ax, 3D00h
+    int 21h
+    jc  .fail_sti
+    mov [filehandle], ax
+
+    ; read 54-byte header
+    mov bx, [filehandle]
+    mov ah, 3Fh
+    mov cx, 54
+    mov dx, bmp_header
+    int 21h
+
+    ; read 1024-byte palette (256 * 4 bytes BGRX)
+    mov bx, [filehandle]
+    mov ah, 3Fh
+    mov cx, 1024
+    mov dx, bmp_palette
+    int 21h
+
+    ; program VGA palette (DAC)
+    mov dx, 03C8h
+    xor al, al
+    out dx, al
+    inc dx                  ; 03C9h = data port
+    mov si, bmp_palette
+    mov cx, 256
+.pal_loop:
+    mov al, [si+2]          ; R
+    shr al, 2
+    out dx, al
+    mov al, [si+1]          ; G
+    shr al, 2
+    out dx, al
+    mov al, [si+0]          ; B
+    shr al, 2
+    out dx, al
+    add si, 4
+    loop .pal_loop
+
+    ; write pixel data bank by bank (640x480 = 307200 bytes, 5 banks of ~64K)
+    xor si, si
+.full_banks:
+    cmp si, 4
+    je  .last_bank
+
+    mov dx, si
+    call set_vesa_bank
+
+    mov bx, [filehandle]
+    mov cx, 32768
+    xor dx, dx
+    call read_chunk_to_vram
+
+    mov bx, [filehandle]
+    mov cx, 32768
+    mov dx, 8000h
+    call read_chunk_to_vram
+
+    inc si
+    jmp .full_banks
+
+.last_bank:
+    mov dx, si
+    call set_vesa_bank
+
+    mov bx, [filehandle]
+    mov cx, 32768
+    xor dx, dx
+    call read_chunk_to_vram
+
+    mov bx, [filehandle]
+    mov cx, 12288
+    mov dx, 8000h
+    call read_chunk_to_vram
+
+    mov ax, 3E00h
+    mov bx, [filehandle]
+    int 21h
+    sti                         ; re-enable INT 8h after all file I/O is done
+    ret
+.fail_sti:
+    sti
+.fail:
+    ret
+
+set_vesa_bank:
+    ; IN: DX = bank number. Do NOT push/pop DX - it must stay set for INT 10h
+    push ax
+    push bx
+    mov ax, 4F05h
+    xor bx, bx              ; BX=0 = write window A, DX = bank number
+    int 10h
+    pop bx
+    pop ax
+    ret
+
+read_chunk_to_vram:
+    push si
+    push ds
+    mov ax, 0A000h
+    mov ds, ax
+    mov ah, 3Fh
+    int 21h
+    pop ds
+    pop si
+    ret
+
+; =============================================================================
+; DATA
+; =============================================================================
+; =============================================================================
+; IMF MUSIC ENGINE  -  OPL2 / AdLib playback via INT 8h hook
+; IMF format type-0: stream of records [reg(1), val(1), delay(2)]
+;   delay = 0-based count of OPL timer ticks (per original IMF spec)
+;   OPL timer rate used by id Software: 700 Hz  (type-0 IMF)
+;   INT 8h fires at 18.2 Hz by default; we reprogram PIT to 700 Hz
+;   and call the original INT 8h every 700/18.2 ≈ 38 ticks.
+;
+; Usage:
+;   mov  si, filename_ptr   ; zero-terminated filename of .imf file
+;   call imf_start          ; load file, hook INT 8h, begin playback
+;   call imf_stop           ; silence OPL, restore INT 8h, free memory
+; =============================================================================
+
+OPL_REG    equ 0388h        ; AdLib register port
+OPL_DAT    equ 0389h        ; AdLib data port
+IMF_RATE   equ 700          ; IMF tick rate in Hz (type-0 files)
+PIT_FREQ   equ 1193182      ; 8253 input frequency
+PIT_DIV    equ (PIT_FREQ / IMF_RATE)   ; = 1704  -> reprogrammed divisor
+PIT_ORIG   equ 0            ; original divisor (0 = 65536 = 18.2 Hz)
+INT8_CHAIN equ (PIT_DIV)               ; chain original every ~1704 ticks (~18.2 Hz)
+
+; ---------------------------------------------------------------------------
+; imf_start  -  load .imf file into XMS/conventional RAM and hook INT 8h
+; IN:  SI = pointer to zero-terminated filename
+; Trashes: ax,bx,cx,dx,si,di (caller must not care)
+; ---------------------------------------------------------------------------
+imf_start:
+    push cs
+    pop  ds
+
+    ; -- open file --
+    mov  dx, si             ; DS:DX = filename
+    mov  ax, 3D00h          ; open read-only
+    int  21h
+    jc   .imf_nofile
+    mov  [imf_handle], ax
+
+    ; -- read into imf_buf (up to IMF_BUFSIZE bytes) --
+    mov  bx, ax             ; file handle
+    mov  dx, imf_buf        ; DS:DX = buffer
+    mov  cx, IMF_BUFSIZE    ; bytes to read
+    mov  ah, 3Fh
+    int  21h
+    jc   .imf_close
+    mov  [imf_size], ax     ; actual bytes read (words)
+
+    ; -- close file --
+.imf_close:
+    mov  bx, [imf_handle]
+    mov  ah, 3Eh
+    int  21h
+
+    ; -- reset playback state --
+    mov  word [imf_pos],   0
+    mov  word [imf_delay], 0
+    mov  word [imf_chain], 0
+    mov  byte [imf_active], 1
+
+    ; -- silence all OPL channels before starting --
+    call opl_reset
+
+    ; -- hook INT 8h --
+    cli
+    ; save old INT 8 vector
+    mov  ax, 3508h
+    int  21h                ; ES:BX = old vector
+    mov  [old_int8_off], bx
+    mov  [old_int8_seg], es
+
+    ; install new handler
+    push ds
+    push cs
+    pop  ds
+    mov  dx, imf_int8
+    mov  ax, 2508h
+    int  21h
+    pop  ds
+
+    ; reprogram PIT channel 0 to IMF_RATE Hz
+    mov  al, 36h            ; channel 0, LSB+MSB, mode 3, binary
+    out  43h, al
+    mov  ax, PIT_DIV
+    out  40h, al
+    mov  al, ah
+    out  40h, al
+    sti
+.imf_nofile:
+    ret
+
+; ---------------------------------------------------------------------------
+; imf_stop  -  silence OPL and restore INT 8h
+; ---------------------------------------------------------------------------
+imf_stop:
+    cmp  byte [imf_active], 0
+    je   .is_done
+    cli
+    mov  byte [imf_active], 0
+
+    ; restore PIT to 18.2 Hz (divisor 0 = 65536)
+    mov  al, 36h
+    out  43h, al
+    xor  al, al
+    out  40h, al
+    out  40h, al
+
+    ; restore original INT 8h vector
+    push ds
+    mov  ax, [old_int8_seg]
+    mov  ds, ax
+    mov  dx, [old_int8_off]
+    mov  ax, 2508h
+    int  21h
+    pop  ds
+    sti
+
+    call opl_reset          ; silence all OPL channels
+.is_done:
+    ret
+
+; ---------------------------------------------------------------------------
+; imf_int8  -  INT 8h handler: tick IMF playback, chain original handler
+; ---------------------------------------------------------------------------
+imf_int8:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push ds
+
+    push cs
+    pop  ds
+
+    ; -- chain original INT 8h at 18.2 Hz --
+    inc  word [imf_chain]
+    mov  ax, [imf_chain]
+    cmp  ax, INT8_CHAIN
+    jb   .skip_chain
+    mov  word [imf_chain], 0
+    ; send EOI, then far-call old handler (it will send its own EOI)
+    pushf
+    call far [cs:old_int8_off]
+    jmp  .no_eoi
+.skip_chain:
+    ; send EOI ourselves
+    mov  al, 20h
+    out  20h, al
+.no_eoi:
+
+    cmp  byte [imf_active], 0
+    je   .int8_done
+
+    ; -- advance delay counter --
+    mov  ax, [imf_delay]
+    or   ax, ax
+    jz   .play_events
+    dec  word [imf_delay]
+    jmp  .int8_done
+
+.play_events:
+    ; -- play all zero-delay events at current position --
+    mov  si, [imf_pos]
+    mov  cx, [imf_size]
+
+.evt_loop:
+    cmp  si, cx
+    jae  .imf_loop          ; past end: loop
+
+    ; read record: [reg(1), val(1), delay(2)]
+    mov  bx, imf_buf
+    mov  al, [bx + si]      ; register
+    mov  ah, [bx + si + 1]  ; value
+    mov  dx, [bx + si + 2]  ; delay (next event delta)
+    add  si, 4
+
+    ; write to OPL  (dx = delay from record, save it across port writes)
+    push dx                  ; save delay
+    mov  dx, OPL_REG
+    out  dx, al
+    ; short delay for OPL chip to settle (~3.3 µs)
+    in   al, 80h
+    in   al, 80h
+    in   al, 80h
+    mov  al, ah
+    mov  dx, OPL_DAT
+    out  dx, al
+    in   al, 80h
+    in   al, 80h
+    in   al, 80h
+    pop  dx                  ; restore delay
+
+    or   dx, dx
+    jnz  .evt_delay
+    jmp  .evt_loop          ; delay=0: continue immediately
+
+.evt_delay:
+    mov  [imf_delay], dx
+    jmp  .save_pos
+
+.imf_loop:
+    ; loop: reset to beginning
+    mov  si, 0
+    mov  word [imf_delay], 0
+    jmp  .evt_loop
+
+.save_pos:
+    mov  [imf_pos], si
+
+.int8_done:
+    pop  ds
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    iret
+
+; ---------------------------------------------------------------------------
+; opl_reset  -  silence all OPL2 channels (writes key-off to all 9 voices)
+; ---------------------------------------------------------------------------
+opl_reset:
+    push ax
+    push cx
+    push dx
+
+    ; Reset all 9 channels: write 0 to B0h-B8h (key-off)
+    mov  dx, OPL_REG
+    mov  cx, 9
+    mov  ah, 0
+    mov  al, 0B0h           ; first key-on register
+.opl_ch:
+    out  dx, al             ; select register
+    in   al, 80h
+    in   al, 80h
+    in   al, 80h
+    push ax
+    mov  al, ah             ; value = 0 (key off)
+    inc  dx                 ; data port
+    out  dx, al
+    in   al, 80h
+    in   al, 80h
+    in   al, 80h
+    dec  dx                 ; back to register port
+    pop  ax
+    inc  al                 ; next channel register
+    loop .opl_ch
+
+    pop  dx
+    pop  cx
+    pop  ax
+    ret
+
+; ---------------------------------------------------------------------------
+; IMF state variables
+; ---------------------------------------------------------------------------
+IMF_BUFSIZE  equ 32768       ; max .imf file size supported (32 KB)
+
+imf_handle:  dw  0
+imf_size:    dw  0           ; bytes loaded
+imf_pos:     dw  0           ; current playback position in buffer
+imf_delay:   dw  0           ; ticks remaining before next event
+imf_chain:   dw  0           ; counter for chaining original INT 8h
+imf_active:  db  0           ; 1 = playing, 0 = stopped
+old_int8_off: dw 0
+old_int8_seg: dw 0
+
+imf_buf:     times IMF_BUFSIZE db 0   ; music data buffer
+
+
+file_welcome:     db 'WELCOME.BMP', 0
+file_imf_welcome: db 'WELCOME.IMF', 0
+file_imf_1p:      db '1PMUSIC.IMF', 0
+file_imf_2p:      db '2PMUSIC.IMF', 0
+file_imf_end:     db 'END.IMF', 0
+file_gamemode:    db 'GAMEMOD.BMP', 0
+file_2p_p1ready:  db 'P1READY.BMP', 0
+file_2p_p2ready:  db 'P2READY.BMP', 0
+file_2p_p1wins:   db '2P-P1WIN.BMP', 0
+file_2p_p2wins:   db '2P-P2WIN.BMP', 0
+file_2p_draw:     db '2P-DRAW.BMP', 0
+file_leaderboard: db 'LEADERBD.BMP', 0
+file_login1:      db 'LOGIN1.BMP', 0
+file_login2:      db 'LOGIN2.BMP', 0
+file_letsplay:    db 'LETSPLY.BMP', 0
+file_howtoplay:   db 'HWTP.BMP', 0
+file_intro:       db 'INTRO.BMP', 0
+file_names:       db 'NAMES.TXT', 0
+file_perfect:     db 'PERFECT.BMP', 0
+file_goodjob:     db 'GOODJOB.BMP', 0
+file_okay:        db 'OKAY.BMP', 0
+file_tryagain:    db 'TRYAGAIN.BMP', 0
+file_q_sqr_e:     db 'ES-SQR.BMP', 0
+file_q_str_e:     db 'ES-STR.BMP', 0
+file_q_trg_e:     db 'ES-TRG.BMP', 0
+file_q_crl_e:     db 'ES-CRL.BMP', 0
+file_q_crl2_e:    db 'ES-CRL2.BMP', 0
+file_q_e1:        db 'EASY1.BMP', 0
+file_q_e2:        db 'EASY2.BMP', 0
+file_q_e3:        db 'EASY3.BMP', 0
+file_q_e4:        db 'EASY4.BMP', 0
+file_q_e5:        db 'EASY5.BMP', 0
+
+; Easy question BMP table (10 fixed questions)
+q_bmp_table:
+    dw file_q_sqr_e
+    dw file_q_str_e
+    dw file_q_trg_e
+    dw file_q_crl_e
+    dw file_q_crl2_e
+    dw file_q_e1
+    dw file_q_e2
+    dw file_q_e3
+    dw file_q_e4
+    dw file_q_e5
+
+; Easy correct answer table: 1=press1, 2=press2
+; SQR=2 STR=2 TRG=1 CRL=1 CRL2=2 E1=2 E2=1 E3=1 E4=2 E5=1
+q_ans_table:
+    db 2, 2, 1, 1, 2, 2, 1, 1, 2, 1
+
+; ---------------------------------------------------------------------------
+; Medium round (Young Bee) BMP filenames
+; ---------------------------------------------------------------------------
+file_q_d_med:     db 'MD-DIA.BMP', 0
+file_q_h_med:     db 'MD-HRT.BMP', 0
+file_q_st_med:    db 'MD-STR.BMP', 0
+file_q_sq_med:    db 'MD-SQR.BMP', 0
+file_q_rec_med:   db 'MD-RECT.BMP', 0
+file_q_m1:        db 'MED1.BMP', 0
+file_q_m2:        db 'MED2.BMP', 0
+file_q_m3:        db 'MED3.BMP', 0
+file_q_m4:        db 'MED4.BMP', 0
+file_q_m5:        db 'MED5.BMP', 0
+
+; Medium question BMP table (10 questions)
+q_bmp_table_med:
+    dw file_q_d_med
+    dw file_q_h_med
+    dw file_q_st_med
+    dw file_q_sq_med
+    dw file_q_rec_med
+    dw file_q_m1
+    dw file_q_m2
+    dw file_q_m3
+    dw file_q_m4
+    dw file_q_m5
+
+; Medium correct answer table: 1=press1, 2=press2, 3=press3
+; MD-DIA=1  MD-HRT=2  MD-STR=2  MD-SQR=3  MD-RECT=3
+; MED1=1    MED2=3    MED3=2    MED4=3    MED5=2
+q_ans_table_med:
+    db 1, 2, 2, 3, 3, 1, 3, 2, 3, 2
+
+; ---------------------------------------------------------------------------
+; Hard round (Big Bee) BMP filenames
+; ---------------------------------------------------------------------------
+file_q_spr_hard:  db 'HD-SPR.BMP', 0
+file_q_pt_hard:   db 'HD-PT.BMP', 0
+file_q_ot_hard:   db 'HD-OT.BMP', 0
+file_q_clr_hard:  db 'HD-CLR.BMP', 0
+file_q_cb_hard:   db 'HD-CB.BMP', 0
+file_q_hd1:       db 'HD1.BMP', 0
+file_q_hd2:       db 'HD2.BMP', 0
+file_q_hd3:       db 'HD3.BMP', 0
+file_q_hd4:       db 'HD4.BMP', 0
+file_q_hd5:       db 'HD5.BMP', 0
+
+; Hard question BMP table (10 questions)
+q_bmp_table_hard:
+    dw file_q_spr_hard
+    dw file_q_pt_hard
+    dw file_q_ot_hard
+    dw file_q_clr_hard
+    dw file_q_cb_hard
+    dw file_q_hd1
+    dw file_q_hd2
+    dw file_q_hd3
+    dw file_q_hd4
+    dw file_q_hd5
+
+; Hard correct answer table: 1=press1 2=press2 3=press3 4=press4
+; HD-SPR=3 HD-PT=4 HD-OT=4 HD-CLR=2 HD-CB=2
+; HD1=3    HD2=4   HD3=1   HD4=2    HD5=3
+q_ans_table_hard:
+    db 3, 4, 4, 2, 2, 3, 4, 1, 2, 3
+
+filehandle:       dw 0
+bmp_header:       times 54   db 0
+bmp_palette:      times 1024 db 0
+
+player1_name:     times MAX_NAME+1 db 0
+player2_name:     times MAX_NAME+1 db 0
+p1_len:           db 0
+p2_len:           db 0
+active_field:     db 0
+game_mode:        db 0    ; 1 = single player, 2 = two player
+difficulty:       db 0    ; 1 = Baby Bee, 2 = Young Bee, 3 = Big Bee
+current_player:   db 0    ; 2P mode: 0 = Player 1's turn, 1 = Player 2's turn
+p1_score:         dw 0    ; 2P mode: Player 1 saved score
+p2_score:         dw 0    ; 2P mode: Player 2 saved score
+p1_correct:       db 0    ; 2P mode: Player 1 saved correct count
+p2_correct:       db 0    ; 2P mode: Player 2 saved correct count
+sn_byte:          db 0    ; scratch byte for save_names writes
+hud_color:        db 0    ; scratch for HUD drawing color
+cur_max_hearts:   db 3    ; hearts for current round (set by start_game)
+cur_total_q:      db 3    ; total questions for current round
+cur_bmp_table:    dw q_bmp_table    ; pointer to active question BMP table
+cur_ans_table:    dw q_ans_table    ; pointer to active answer table
+hearts:           db 0    ; current hearts remaining
+game_score:       dw 0    ; current game score
+q_num:            db 0    ; current question number (0-based)
+correct_count:    db 0    ; number of correct answers
+num_buf:          times 8 db 0  ; scratch buffer for number-to-string
+
+; Leaderboard data
+lb_board:    times 3 * 5 * 12 db 0  ; 3 cols x 5 rows x 12 bytes each
+lb_used:     db 0, 0, 0              ; used count per column
+lb_rbuf:     times 130 db 0          ; line read buffer
+lb_tmp_name: times 11  db 0          ; temp name buffer (10 + null)
+lb_tmp_score: dw 0                   ; temp score
+lb_tmp_diff:  db 0                   ; temp difficulty
+lb_col_x:     dw 0                   ; current column x for drawing
+
+; =============================================================================
+; 8x8 BITMAP FONT  ASCII 32-127  (96 glyphs x 8 bytes)
+; Classic VGA BIOS font (CP437) - proven readable at 8x8
+; =============================================================================
+font_data:
+; 32 space
+db 000h,000h,000h,000h,000h,000h,000h,000h
+; 33 !
+db 018h,03Ch,03Ch,018h,018h,000h,018h,000h
+; 34 "
+db 06Ch,06Ch,06Ch,000h,000h,000h,000h,000h
+; 35 #
+db 06Ch,06Ch,0FEh,06Ch,0FEh,06Ch,06Ch,000h
+; 36 $
+db 018h,07Eh,0C0h,07Ch,006h,0FCh,018h,000h
+; 37 %
+db 000h,0C6h,0CCh,018h,030h,066h,0C6h,000h
+; 38 &
+db 038h,06Ch,038h,076h,0DCh,0CCh,076h,000h
+; 39 '
+db 018h,018h,030h,000h,000h,000h,000h,000h
+; 40 (
+db 00Ch,018h,030h,030h,030h,018h,00Ch,000h
+; 41 )
+db 030h,018h,00Ch,00Ch,00Ch,018h,030h,000h
+; 42 *
+db 000h,066h,03Ch,0FFh,03Ch,066h,000h,000h
+; 43 +
+db 000h,018h,018h,07Eh,018h,018h,000h,000h
+; 44 ,
+db 000h,000h,000h,000h,000h,018h,018h,030h
+; 45 -
+db 000h,000h,000h,07Eh,000h,000h,000h,000h
+; 46 .
+db 000h,000h,000h,000h,000h,018h,018h,000h
+; 47 /
+db 006h,00Ch,018h,030h,060h,0C0h,080h,000h
+; 48 0
+db 07Ch,0C6h,0CEh,0D6h,0E6h,0C6h,07Ch,000h
+; 49 1
+db 018h,038h,018h,018h,018h,018h,07Eh,000h
+; 50 2
+db 07Ch,0C6h,006h,01Ch,030h,066h,0FEh,000h
+; 51 3
+db 07Ch,0C6h,006h,03Ch,006h,0C6h,07Ch,000h
+; 52 4
+db 01Ch,03Ch,06Ch,0CCh,0FEh,00Ch,01Eh,000h
+; 53 5
+db 0FEh,0C0h,0C0h,0FCh,006h,0C6h,07Ch,000h
+; 54 6
+db 038h,060h,0C0h,0FCh,0C6h,0C6h,07Ch,000h
+; 55 7
+db 0FEh,0C6h,00Ch,018h,030h,030h,030h,000h
+; 56 8
+db 07Ch,0C6h,0C6h,07Ch,0C6h,0C6h,07Ch,000h
+; 57 9
+db 07Ch,0C6h,0C6h,07Eh,006h,00Ch,078h,000h
+; 58 :
+db 000h,018h,018h,000h,000h,018h,018h,000h
+; 59 ;
+db 000h,018h,018h,000h,000h,018h,018h,030h
+; 60 <
+db 006h,00Ch,018h,030h,018h,00Ch,006h,000h
+; 61 =
+db 000h,000h,07Eh,000h,000h,07Eh,000h,000h
+; 62 >
+db 060h,030h,018h,00Ch,018h,030h,060h,000h
+; 63 ?
+db 07Ch,0C6h,00Ch,018h,018h,000h,018h,000h
+; 64 @
+db 07Ch,0C6h,0DEh,0DEh,0DEh,0C0h,078h,000h
+; 65 A
+db 038h,06Ch,0C6h,0FEh,0C6h,0C6h,0C6h,000h
+; 66 B
+db 0FCh,066h,066h,07Ch,066h,066h,0FCh,000h
+; 67 C
+db 03Ch,066h,0C0h,0C0h,0C0h,066h,03Ch,000h
+; 68 D
+db 0F8h,06Ch,066h,066h,066h,06Ch,0F8h,000h
+; 69 E
+db 0FEh,062h,068h,078h,068h,062h,0FEh,000h
+; 70 F
+db 0FEh,062h,068h,078h,068h,060h,0F0h,000h
+; 71 G
+db 03Ch,066h,0C0h,0C0h,0CEh,066h,03Eh,000h
+; 72 H
+db 0C6h,0C6h,0C6h,0FEh,0C6h,0C6h,0C6h,000h
+; 73 I
+db 03Ch,018h,018h,018h,018h,018h,03Ch,000h
+; 74 J
+db 01Eh,00Ch,00Ch,00Ch,0CCh,0CCh,078h,000h
+; 75 K
+db 0E6h,066h,06Ch,078h,06Ch,066h,0E6h,000h
+; 76 L
+db 0F0h,060h,060h,060h,062h,066h,0FEh,000h
+; 77 M
+db 0C6h,0EEh,0FEh,0FEh,0D6h,0C6h,0C6h,000h
+; 78 N
+db 0C6h,0E6h,0F6h,0DEh,0CEh,0C6h,0C6h,000h
+; 79 O
+db 038h,06Ch,0C6h,0C6h,0C6h,06Ch,038h,000h
+; 80 P
+db 0FCh,066h,066h,07Ch,060h,060h,0F0h,000h
+; 81 Q
+db 078h,0CCh,0CCh,0CCh,0DCh,078h,01Ch,000h
+; 82 R
+db 0FCh,066h,066h,07Ch,06Ch,066h,0E6h,000h
+; 83 S
+db 07Ch,0C6h,0C0h,07Ch,006h,0C6h,07Ch,000h
+; 84 T
+db 07Eh,07Eh,05Ah,018h,018h,018h,03Ch,000h
+; 85 U
+db 0C6h,0C6h,0C6h,0C6h,0C6h,0C6h,07Ch,000h
+; 86 V
+db 0C6h,0C6h,0C6h,0C6h,0C6h,06Ch,038h,000h
+; 87 W
+db 0C6h,0C6h,0C6h,0D6h,0FEh,0EEh,0C6h,000h
+; 88 X
+db 0C6h,0C6h,06Ch,038h,038h,06Ch,0C6h,000h
+; 89 Y
+db 066h,066h,066h,03Ch,018h,018h,03Ch,000h
+; 90 Z
+db 0FEh,0C6h,08Ch,018h,032h,066h,0FEh,000h
+; 91 [
+db 03Ch,030h,030h,030h,030h,030h,03Ch,000h
+; 92 \
+db 0C0h,060h,030h,018h,00Ch,006h,002h,000h
+; 93 ]
+db 03Ch,00Ch,00Ch,00Ch,00Ch,00Ch,03Ch,000h
+; 94 ^
+db 010h,038h,06Ch,0C6h,000h,000h,000h,000h
+; 95 _
+db 000h,000h,000h,000h,000h,000h,000h,0FFh
+; 96 `
+db 030h,018h,00Ch,000h,000h,000h,000h,000h
+; 97 a
+db 000h,000h,078h,00Ch,07Ch,0CCh,076h,000h
+; 98 b
+db 0E0h,060h,060h,07Ch,066h,066h,0DCh,000h
+; 99 c
+db 000h,000h,078h,0CCh,0C0h,0CCh,078h,000h
+; 100 d
+db 01Ch,00Ch,00Ch,07Ch,0CCh,0CCh,076h,000h
+; 101 e
+db 000h,000h,078h,0CCh,0FCh,0C0h,078h,000h
+; 102 f
+db 038h,06Ch,060h,0F0h,060h,060h,0F0h,000h
+; 103 g
+db 000h,000h,076h,0CCh,0CCh,07Ch,00Ch,0F8h
+; 104 h
+db 0E0h,060h,06Ch,076h,066h,066h,0E6h,000h
+; 105 i
+db 018h,000h,038h,018h,018h,018h,03Ch,000h
+; 106 j
+db 006h,000h,006h,006h,006h,066h,066h,03Ch
+; 107 k
+db 0E0h,060h,066h,06Ch,078h,06Ch,0E6h,000h
+; 108 l
+db 038h,018h,018h,018h,018h,018h,03Ch,000h
+; 109 m
+db 000h,000h,0CCh,0FEh,0FEh,0D6h,0C6h,000h
+; 110 n
+db 000h,000h,0F8h,0CCh,0CCh,0CCh,0CCh,000h
+; 111 o
+db 000h,000h,078h,0CCh,0CCh,0CCh,078h,000h
+; 112 p
+db 000h,000h,0DCh,066h,066h,07Ch,060h,0F0h
+; 113 q
+db 000h,000h,076h,0CCh,0CCh,07Ch,00Ch,01Eh
+; 114 r
+db 000h,000h,0DCh,076h,066h,060h,0F0h,000h
+; 115 s
+db 000h,000h,07Ch,0C0h,078h,00Ch,0F8h,000h
+; 116 t
+db 010h,030h,07Ch,030h,030h,034h,018h,000h
+; 117 u
+db 000h,000h,0CCh,0CCh,0CCh,0CCh,076h,000h
+; 118 v
+db 000h,000h,0CCh,0CCh,0CCh,078h,030h,000h
+; 119 w
+db 000h,000h,0C6h,0D6h,0FEh,0FEh,06Ch,000h
+; 120 x
+db 000h,000h,0C6h,06Ch,038h,06Ch,0C6h,000h
+; 121 y
+db 000h,000h,0CCh,0CCh,0CCh,07Ch,00Ch,0F8h
+; 122 z
+db 000h,000h,0FCh,098h,030h,064h,0FCh,000h
+; 123 {
+db 01Ch,030h,030h,0E0h,030h,030h,01Ch,000h
+; 124 |
+db 018h,018h,018h,000h,018h,018h,018h,000h
+; 125 }
+db 0E0h,030h,030h,01Ch,030h,030h,0E0h,000h
+; 126 ~
+db 076h,0DCh,000h,000h,000h,000h,000h,000h
+; 127 DEL
+db 000h,000h,000h,000h,000h,000h,000h,000h
