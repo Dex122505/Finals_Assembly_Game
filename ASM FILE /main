@@ -47,12 +47,14 @@ start:
     pop ds
     mov dx, file_welcome
     call load_bmp_640x480
-    ; Start WELCOME music (homepage through how-to-play)
-    call imf_stop
-    mov  si, file_imf_welcome
-    call imf_start
+    ; start WELCOME music (home screen + menus)
+    push cs
+    pop  ds
+    mov  dx, file_imf_welcome
+    call imf_load
 
 wait_welcome:
+    call imf_tick
     mov ah, 01h
     int 16h
     jz  wait_welcome
@@ -78,8 +80,12 @@ show_gamemode:
     call load_bmp_640x480
 
 wait_gamemode:
-    mov ah, 00h
+    call imf_tick
+    mov ah, 01h
     int 16h
+    jz  wait_gamemode           ; no key ready, keep ticking
+    mov ah, 00h
+    int 16h                     ; consume the key
     cmp al, '1'
     je  show_login1
     cmp al, '2'
@@ -107,8 +113,12 @@ show_login1:
     mov byte [p1_len], 0
 
 wait_login1:
+    call imf_tick
+    mov ah, 01h
+    int 16h
+    jz  wait_login1             ; no key ready, keep ticking
     mov ah, 00h
-    int 16h                   ; AL = ASCII, AH = scan code
+    int 16h                     ; AL = ASCII, AH = scan code
 
     cmp al, 27
     je  show_gamemode
@@ -259,6 +269,7 @@ show_login2:
     mov byte [active_field], 0
 
 wait_login2:
+    call imf_tick
     ; --- check mouse button (INT 33h AX=0003h) ---
     ; Returns: BX=button state (bit0=left), CX=x, DX=y
     mov ax, 0003h
@@ -523,8 +534,12 @@ show_difficulty:
     call load_bmp_640x480
 
 wait_difficulty:
-    mov ah, 00h
+    call imf_tick
+    mov ah, 01h
     int 16h
+    jz  wait_difficulty         ; no key ready, keep ticking
+    mov ah, 00h
+    int 16h                     ; consume the key
     cmp al, '1'
     je  diff_baby
     cmp al, '2'
@@ -557,8 +572,12 @@ show_howtoplay:
     call load_bmp_640x480
 
 wait_howtoplay:
-    mov ah, 00h
+    call imf_tick
+    mov ah, 01h
     int 16h
+    jz  wait_howtoplay          ; no key ready, keep ticking
+    mov ah, 00h
+    int 16h                     ; consume the key
     cmp al, 27
     je  show_difficulty      ; ESC goes back to difficulty select
     cmp al, 13
@@ -575,8 +594,12 @@ show_intro:
     call load_bmp_640x480
 
 wait_intro:
-    mov ah, 00h
+    call imf_tick
+    mov ah, 01h
     int 16h
+    jz  wait_intro              ; no key ready, keep ticking
+    mov ah, 00h
+    int 16h                     ; consume the key
     cmp al, 27
     je  show_howtoplay       ; ESC goes back to how to play
     cmp al, 13
@@ -615,16 +638,6 @@ TOTAL_Q_E   equ 10          ; questions picked per game (all 10)
 start_game:
     push cs
     pop  ds
-    ; Start gameplay music based on mode (1P or 2P)
-    call imf_stop
-    cmp  byte [game_mode], 2
-    je   .sg_music_2p
-    mov  si, file_imf_1p
-    jmp  .sg_music_play
-.sg_music_2p:
-    mov  si, file_imf_2p
-.sg_music_play:
-    call imf_start
     ; branch on difficulty: 2 = Young Bee (medium), 3 = Big Bee (hard)
     cmp  byte [difficulty], 2
     je   start_game_med
@@ -640,6 +653,9 @@ start_game:
     mov  word [game_score],     0
     mov  byte [q_num],          0
     mov  byte [correct_count],  0
+
+    ; no background music during gameplay rounds
+    call imf_stop
 
     ; --- 2P: show player-ready splash before starting ---
     cmp  byte [game_mode], 2
@@ -694,8 +710,12 @@ game_loop:
     call draw_hud
 
 wait_answer:
-    mov  ah, 00h
+    call imf_tick
+    mov  ah, 01h
     int  16h
+    jz   wait_answer            ; no key ready, keep ticking
+    mov  ah, 00h
+    int  16h                    ; consume the key
     cmp  al, 27
     je   start
     cmp  al, '1'
@@ -750,7 +770,8 @@ wait_answer:
     inc  byte [correct_count]
     add  word [game_score], 10
     inc  byte [q_num]
-    call draw_hud            ; update score on screen immediately
+    call draw_hud
+    call snd_correct
     jmp  game_loop
 
 .do_wrong:
@@ -758,7 +779,8 @@ wait_answer:
     pop  ds
     dec  byte [hearts]
     inc  byte [q_num]
-    call draw_hud            ; show lost heart immediately
+    call draw_hud
+    call snd_wrong
     jmp  game_loop
 
 ; =============================================================================
@@ -778,6 +800,9 @@ start_game_med:
     mov  word [game_score],     0
     mov  byte [q_num],          0
     mov  byte [correct_count],  0
+
+    ; no background music during gameplay rounds
+    call imf_stop
 
     ; --- 2P: show player-ready splash before starting ---
     cmp  byte [game_mode], 2
@@ -817,6 +842,9 @@ start_game_hard:
     mov  word [game_score],     0
     mov  byte [q_num],          0
     mov  byte [correct_count],  0
+
+    ; no background music during gameplay rounds
+    call imf_stop
 
     ; --- 2P: show player-ready splash before starting ---
     cmp  byte [game_mode], 2
@@ -871,6 +899,12 @@ game_finish:
 
 .gf_single:
     ; --- single-player finish (original logic) ---
+    ; load END music
+    push cs
+    pop  ds
+    mov  dx, file_imf_end
+    call imf_load
+
     mov  al, [correct_count]
     mov  bl, 100
     mul  bl
@@ -894,9 +928,6 @@ game_finish:
 .gf_try:     mov dx, file_tryagain
 
 .gf_show:
-    call imf_stop
-    mov  si, file_imf_end
-    call imf_start
     call load_bmp_640x480
     call save_score
     call delay_2s
@@ -932,9 +963,10 @@ game_over_screen:
     jmp  show_2p_winner
 
 .go_single:
-    call imf_stop
-    mov  si, file_imf_end
-    call imf_start
+    push cs
+    pop  ds
+    mov  dx, file_imf_end
+    call imf_load
     mov  dx, file_tryagain
     call load_bmp_640x480
     call save_score
@@ -949,11 +981,13 @@ show_2p_winner:
     pop  ds
     ; reset current_player for next game
     mov  byte [current_player], 0
-    ; Play END music
-    call imf_stop
-    mov  si, file_imf_end
-    call imf_start
 
+    ; load END music
+    mov  dx, file_imf_end
+    call imf_load
+
+    push cs
+    pop  ds
     mov  ax, [p1_score]
     mov  bx, [p2_score]
     cmp  ax, bx
@@ -974,8 +1008,12 @@ show_2p_winner:
     call delay_2s
 
 wait_2p_winner:
-    mov  ah, 00h
+    call imf_tick
+    mov  ah, 01h
     int  16h
+    jz   wait_2p_winner         ; no key ready, keep ticking
+    mov  ah, 00h
+    int  16h                    ; consume the key
     cmp  al, 27
     je   start
     cmp  al, 13
@@ -1191,15 +1229,15 @@ draw_hud:
     call draw_char
     mov  al, ':'
     call draw_char
+    xor  ah, ah
     mov  al, [q_num]
-    inc  al               ; 1-based
-    add  al, '0'
-    call draw_char
+    inc  ax
+    call draw_num_ax
     mov  al, '/'
     call draw_char
+    xor  ah, ah
     mov  al, [cur_total_q]
-    add  al, '0'
-    call draw_char
+    call draw_num_ax
 
     ; ── 2P: draw current player indicator ──────────────────────────────────
     cmp  byte [game_mode], 2
@@ -1303,6 +1341,126 @@ delay_2s:
     jb   .dl_wait
 .dl_done:
     pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+; ---------------------------------------------------------------------------
+; spk_on  IN: BX = PIT divisor (1193180 / freq_hz)  - starts PC speaker tone
+; ---------------------------------------------------------------------------
+spk_on:
+    mov  al, 0B6h
+    out  43h, al
+    mov  al, bl
+    out  42h, al
+    mov  al, bh
+    out  42h, al
+    in   al, 61h
+    or   al, 03h
+    out  61h, al
+    ret
+
+; ---------------------------------------------------------------------------
+; spk_off  -  silences PC speaker
+; ---------------------------------------------------------------------------
+spk_off:
+    in   al, 61h
+    and  al, 0FCh
+    out  61h, al
+    ret
+
+; ---------------------------------------------------------------------------
+; spk_wait  IN: CX = BIOS ticks to wait (18.2/sec) - CPU-speed independent
+; ---------------------------------------------------------------------------
+spk_wait:
+    push ax
+    push bx
+    push cx
+    push dx
+    mov  bx, cx
+    mov  ah, 00h
+    int  1Ah
+    add  dx, bx
+    adc  cx, 0
+    mov  bx, dx
+    mov  [.hi], cx
+.loop:
+    mov  ah, 00h
+    int  1Ah
+    cmp  cx, [.hi]
+    ja   .done
+    jb   .loop
+    cmp  dx, bx
+    jb   .loop
+.done:
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+.hi: dw 0
+
+; ---------------------------------------------------------------------------
+; snd_correct  -  happy beep: two rising pairs E5->G5, E6->G6
+; ---------------------------------------------------------------------------
+snd_correct:
+    push ax
+    push bx
+    push cx
+    mov  bx, 1810          ; E5 = 659 Hz
+    call spk_on
+    mov  cx, 1
+    call spk_wait
+    mov  bx, 1522          ; G5 = 784 Hz
+    call spk_on
+    mov  cx, 1
+    call spk_wait
+    call spk_off
+    mov  cx, 1
+    call spk_wait
+    mov  bx, 904           ; E6 = 1319 Hz
+    call spk_on
+    mov  cx, 1
+    call spk_wait
+    mov  bx, 761           ; G6 = 1568 Hz
+    call spk_on
+    mov  cx, 2
+    call spk_wait
+    call spk_off
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+; ---------------------------------------------------------------------------
+; snd_wrong  -  descending tone: G5 -> E5 -> C5 -> A4 -> F4
+; ---------------------------------------------------------------------------
+snd_wrong:
+    push ax
+    push bx
+    push cx
+    mov  bx, 1522          ; G5 = 784 Hz
+    call spk_on
+    mov  cx, 1
+    call spk_wait
+    mov  bx, 1810          ; E5 = 659 Hz
+    call spk_on
+    mov  cx, 1
+    call spk_wait
+    mov  bx, 2281          ; C5 = 523 Hz
+    call spk_on
+    mov  cx, 1
+    call spk_wait
+    mov  bx, 2712          ; A4 = 440 Hz
+    call spk_on
+    mov  cx, 1
+    call spk_wait
+    mov  bx, 3419          ; F4 = 349 Hz
+    call spk_on
+    mov  cx, 2
+    call spk_wait
+    call spk_off
     pop  cx
     pop  bx
     pop  ax
@@ -1511,6 +1669,12 @@ show_leaderboard:
     mov  dx, file_leaderboard
     call load_bmp_640x480
 
+    ; restore WELCOME music for leaderboard/home area
+    push cs
+    pop  ds
+    mov  dx, file_imf_welcome
+    call imf_load
+
     ; Fix palette index 241 (TEXT_COLOR) to dark brown so draw_char text is
     ; visible on the leaderboard BMP (its palette may map 241 to background).
     push ax
@@ -1624,8 +1788,12 @@ show_leaderboard:
     call lb_drawcol
 
 wait_leaderboard:
-    mov  ah, 00h
+    call imf_tick
+    mov  ah, 01h
     int  16h
+    jz   wait_leaderboard       ; no key ready, keep ticking
+    mov  ah, 00h
+    int  16h                    ; consume the key
     cmp  al, 27
     je   ret_home_from_lb   ; ESC -> home
     cmp  al, 13
@@ -2141,11 +2309,9 @@ set_vesa_640x480:
 ; BMP LOADER  (640x480 8bpp, bottom-up -> written top-of-screen first)
 ; =============================================================================
 load_bmp_640x480:
-    cli                         ; block INT 8h (IMF) while DOS file I/O is active
-                                ; (INT 8h handler sets DS=CS mid-call which corrupts DOS reads)
     mov ax, 3D00h
     int 21h
-    jc  .fail_sti
+    jc  .fail
     mov [filehandle], ax
 
     ; read 54-byte header
@@ -2221,10 +2387,6 @@ load_bmp_640x480:
     mov ax, 3E00h
     mov bx, [filehandle]
     int 21h
-    sti                         ; re-enable INT 8h after all file I/O is done
-    ret
-.fail_sti:
-    sti
 .fail:
     ret
 
@@ -2254,280 +2416,259 @@ read_chunk_to_vram:
 ; DATA
 ; =============================================================================
 ; =============================================================================
-; IMF MUSIC ENGINE  -  OPL2 / AdLib playback via INT 8h hook
-; IMF format type-0: stream of records [reg(1), val(1), delay(2)]
-;   delay = 0-based count of OPL timer ticks (per original IMF spec)
-;   OPL timer rate used by id Software: 700 Hz  (type-0 IMF)
-;   INT 8h fires at 18.2 Hz by default; we reprogram PIT to 700 Hz
-;   and call the original INT 8h every 700/18.2 ≈ 38 ticks.
+; SOUND - OPL2 (AdLib) IMF player
+; IMF format: type-0, 4 bytes per record: BYTE reg, BYTE val, WORD delay(700Hz)
+; Timing: BIOS INT 1Ah at 18.2 ticks/sec; 1 BIOS tick = 38 IMF ticks (700/18.2)
+; We accumulate fractional IMF ticks using a fixed-point counter.
 ;
-; Usage:
-;   mov  si, filename_ptr   ; zero-terminated filename of .imf file
-;   call imf_start          ; load file, hook INT 8h, begin playback
-;   call imf_stop           ; silence OPL, restore INT 8h, free memory
+; imf_load  IN: DX = filename ptr   loads file into imf_buf, resets playback
+; imf_tick  call from every wait loop   drives OPL2 output
+; imf_stop  silence all OPL2 channels
 ; =============================================================================
 
-OPL_REG    equ 0388h        ; AdLib register port
-OPL_DAT    equ 0389h        ; AdLib data port
-IMF_RATE   equ 700          ; IMF tick rate in Hz (type-0 files)
-PIT_FREQ   equ 1193182      ; 8253 input frequency
-PIT_DIV    equ (PIT_FREQ / IMF_RATE)   ; = 1704  -> reprogrammed divisor
-PIT_ORIG   equ 0            ; original divisor (0 = 65536 = 18.2 Hz)
-INT8_CHAIN equ (PIT_DIV)               ; chain original every ~1704 ticks (~18.2 Hz)
-
 ; ---------------------------------------------------------------------------
-; imf_start  -  load .imf file into XMS/conventional RAM and hook INT 8h
-; IN:  SI = pointer to zero-terminated filename
-; Trashes: ax,bx,cx,dx,si,di (caller must not care)
+; imf_load  -  open IMF file, read into imf_buf, reset playback state
+; IN:  DX = pointer to null-terminated filename
+; Destroys: AX, BX, CX, DX (all saved/restored by caller if needed)
 ; ---------------------------------------------------------------------------
-imf_start:
-    push cs
-    pop  ds
-
-    ; -- open file --
-    mov  dx, si             ; DS:DX = filename
-    mov  ax, 3D00h          ; open read-only
-    int  21h
-    jc   .imf_nofile
-    mov  [imf_handle], ax
-
-    ; -- read into imf_buf (up to IMF_BUFSIZE bytes) --
-    mov  bx, ax             ; file handle
-    mov  dx, imf_buf        ; DS:DX = buffer
-    mov  cx, IMF_BUFSIZE    ; bytes to read
-    mov  ah, 3Fh
-    int  21h
-    jc   .imf_close
-    mov  [imf_size], ax     ; actual bytes read (words)
-
-    ; -- close file --
-.imf_close:
-    mov  bx, [imf_handle]
-    mov  ah, 3Eh
-    int  21h
-
-    ; -- reset playback state --
-    mov  word [imf_pos],   0
-    mov  word [imf_delay], 0
-    mov  word [imf_chain], 0
-    mov  byte [imf_active], 1
-
-    ; -- silence all OPL channels before starting --
-    call opl_reset
-
-    ; -- hook INT 8h --
-    cli
-    ; save old INT 8 vector
-    mov  ax, 3508h
-    int  21h                ; ES:BX = old vector
-    mov  [old_int8_off], bx
-    mov  [old_int8_seg], es
-
-    ; install new handler
-    push ds
-    push cs
-    pop  ds
-    mov  dx, imf_int8
-    mov  ax, 2508h
-    int  21h
-    pop  ds
-
-    ; reprogram PIT channel 0 to IMF_RATE Hz
-    mov  al, 36h            ; channel 0, LSB+MSB, mode 3, binary
-    out  43h, al
-    mov  ax, PIT_DIV
-    out  40h, al
-    mov  al, ah
-    out  40h, al
-    sti
-.imf_nofile:
-    ret
-
-; ---------------------------------------------------------------------------
-; imf_stop  -  silence OPL and restore INT 8h
-; ---------------------------------------------------------------------------
-imf_stop:
-    cmp  byte [imf_active], 0
-    je   .is_done
-    cli
-    mov  byte [imf_active], 0
-
-    ; restore PIT to 18.2 Hz (divisor 0 = 65536)
-    mov  al, 36h
-    out  43h, al
-    xor  al, al
-    out  40h, al
-    out  40h, al
-
-    ; restore original INT 8h vector
-    push ds
-    mov  ax, [old_int8_seg]
-    mov  ds, ax
-    mov  dx, [old_int8_off]
-    mov  ax, 2508h
-    int  21h
-    pop  ds
-    sti
-
-    call opl_reset          ; silence all OPL channels
-.is_done:
-    ret
-
-; ---------------------------------------------------------------------------
-; imf_int8  -  INT 8h handler: tick IMF playback, chain original handler
-; ---------------------------------------------------------------------------
-imf_int8:
+imf_load:
     push ax
     push bx
     push cx
     push dx
-    push si
     push ds
-
     push cs
     pop  ds
 
-    ; -- chain original INT 8h at 18.2 Hz --
-    inc  word [imf_chain]
-    mov  ax, [imf_chain]
-    cmp  ax, INT8_CHAIN
-    jb   .skip_chain
-    mov  word [imf_chain], 0
-    ; send EOI, then far-call old handler (it will send its own EOI)
-    pushf
-    call far [cs:old_int8_off]
-    jmp  .no_eoi
-.skip_chain:
-    ; send EOI ourselves
-    mov  al, 20h
-    out  20h, al
-.no_eoi:
+    ; stop any current music first
+    call imf_stop
 
-    cmp  byte [imf_active], 0
-    je   .int8_done
+    ; open file
+    mov  ah, 3Dh
+    mov  al, 00h        ; read-only
+    int  21h
+    jc   .il_fail
 
-    ; -- advance delay counter --
-    mov  ax, [imf_delay]
-    or   ax, ax
-    jz   .play_events
-    dec  word [imf_delay]
-    jmp  .int8_done
+    ; save handle
+    mov  [imf_handle], ax
+    mov  bx, ax
 
-.play_events:
-    ; -- play all zero-delay events at current position --
-    mov  si, [imf_pos]
-    mov  cx, [imf_size]
+    ; read up to IMF_BUFSZ bytes
+    mov  ah, 3Fh
+    mov  cx, IMF_BUFSZ
+    mov  dx, imf_buf
+    int  21h
+    jc   .il_close
 
-.evt_loop:
-    cmp  si, cx
-    jae  .imf_loop          ; past end: loop
+    ; store actual bytes read
+    mov  [imf_size], ax
 
-    ; read record: [reg(1), val(1), delay(2)]
-    mov  bx, imf_buf
-    mov  al, [bx + si]      ; register
-    mov  ah, [bx + si + 1]  ; value
-    mov  dx, [bx + si + 2]  ; delay (next event delta)
-    add  si, 4
+.il_close:
+    mov  ah, 3Eh
+    mov  bx, [imf_handle]
+    int  21h
 
-    ; write to OPL  (dx = delay from record, save it across port writes)
-    push dx                  ; save delay
-    mov  dx, OPL_REG
-    out  dx, al
-    ; short delay for OPL chip to settle (~3.3 µs)
-    in   al, 80h
-    in   al, 80h
-    in   al, 80h
-    mov  al, ah
-    mov  dx, OPL_DAT
-    out  dx, al
-    in   al, 80h
-    in   al, 80h
-    in   al, 80h
-    pop  dx                  ; restore delay
+    ; reset playback pointers
+    mov  word [imf_ptr],     imf_buf
+    mov  word [imf_delay],   0
+    mov  word [imf_frac],    0
+    mov  word [imf_lasttick_lo], 0
+    mov  word [imf_lasttick_hi], 0
+    ; read current BIOS tick as baseline
+    mov  ah, 00h
+    int  1Ah
+    mov  [imf_lasttick_hi], cx
+    mov  [imf_lasttick_lo], dx
+    ; pump first batch of zero-delay records immediately
+    call imf_pump
 
-    or   dx, dx
-    jnz  .evt_delay
-    jmp  .evt_loop          ; delay=0: continue immediately
-
-.evt_delay:
-    mov  [imf_delay], dx
-    jmp  .save_pos
-
-.imf_loop:
-    ; loop: reset to beginning
-    mov  si, 0
-    mov  word [imf_delay], 0
-    jmp  .evt_loop
-
-.save_pos:
-    mov  [imf_pos], si
-
-.int8_done:
+.il_fail:
     pop  ds
-    pop  si
     pop  dx
     pop  cx
     pop  bx
     pop  ax
-    iret
+    ret
 
 ; ---------------------------------------------------------------------------
-; opl_reset  -  silence all OPL2 channels (writes key-off to all 9 voices)
+; imf_tick  -  call from every wait loop to advance OPL2 music
+; Converts elapsed BIOS ticks -> IMF 700Hz ticks, then pumps records.
+; Preserves all registers.
 ; ---------------------------------------------------------------------------
-opl_reset:
+imf_tick:
     push ax
+    push bx
     push cx
     push dx
+    push ds
+    push cs
+    pop  ds
 
-    ; Reset all 9 channels: write 0 to B0h-B8h (key-off)
-    mov  dx, OPL_REG
-    mov  cx, 9
-    mov  ah, 0
-    mov  al, 0B0h           ; first key-on register
-.opl_ch:
-    out  dx, al             ; select register
-    in   al, 80h
-    in   al, 80h
-    in   al, 80h
-    push ax
-    mov  al, ah             ; value = 0 (key off)
-    inc  dx                 ; data port
-    out  dx, al
-    in   al, 80h
-    in   al, 80h
-    in   al, 80h
-    dec  dx                 ; back to register port
-    pop  ax
-    inc  al                 ; next channel register
-    loop .opl_ch
+    ; check if any music loaded
+    cmp  word [imf_size], 0
+    je   .it_done
 
+    ; get current BIOS tick
+    mov  ah, 00h
+    int  1Ah            ; cx:dx = ticks
+
+    ; elapsed = current - last (16-bit lo word suffices for short intervals)
+    mov  ax, dx
+    sub  ax, [imf_lasttick_lo]
+    ; if zero elapsed, nothing to do
+    or   ax, ax
+    jz   .it_done
+
+    ; update last tick
+    mov  [imf_lasttick_lo], dx
+    mov  [imf_lasttick_hi], cx
+
+    ; Convert BIOS ticks -> IMF ticks (700Hz)
+    ; 1 BIOS tick = 700/18.2 = ~38.46 IMF ticks
+    ; Use fixed-point: multiply elapsed_bios * 700, divide by 182 (x10 scale)
+    ; to keep 16-bit math: elapsed * 700 / 182
+    ; (elapsed is usually 1-2, so elapsed*700 fits in 16 bits up to ~93 BIOS ticks)
+    mov  bx, 700
+    mul  bx             ; dx:ax = elapsed * 700
+    ; add fractional carry from last call
+    add  ax, [imf_frac]
+    adc  dx, 0
+    ; divide by 182
+    mov  bx, 182
+    div  bx             ; ax = imf_ticks, dx = remainder
+    mov  [imf_frac], dx ; save fractional remainder
+
+    ; add to delay accumulator
+    add  [imf_delay], ax
+
+    ; pump records while delay exhausted
+    call imf_pump
+
+.it_done:
+    pop  ds
     pop  dx
     pop  cx
+    pop  bx
     pop  ax
     ret
 
 ; ---------------------------------------------------------------------------
-; IMF state variables
+; imf_pump  -  internal: write OPL records while imf_delay covers them
+; DS must = CS.  Destroys AX, BX, CX, DX, SI.
 ; ---------------------------------------------------------------------------
-IMF_BUFSIZE  equ 32768       ; max .imf file size supported (32 KB)
+imf_pump:
+    push si
+.ip_loop:
+    ; check if ptr has reached end of buffer
+    mov  si, [imf_ptr]
+    mov  ax, imf_buf
+    mov  bx, [imf_size]
+    add  ax, bx              ; ax = imf_buf + imf_size  (one past end)
+    cmp  si, ax
+    jb   .ip_inbuf
+    ; end of buffer reached -> loop back to start
+    mov  word [imf_ptr], imf_buf
+    mov  si, imf_buf
 
-imf_handle:  dw  0
-imf_size:    dw  0           ; bytes loaded
-imf_pos:     dw  0           ; current playback position in buffer
-imf_delay:   dw  0           ; ticks remaining before next event
-imf_chain:   dw  0           ; counter for chaining original INT 8h
-imf_active:  db  0           ; 1 = playing, 0 = stopped
-old_int8_off: dw 0
-old_int8_seg: dw 0
+.ip_inbuf:
+    ; read record: byte reg, byte val, word delay
+    mov  al, [si]       ; OPL register
+    mov  ah, [si+1]     ; OPL value
+    mov  bx, [si+2]     ; IMF delay for NEXT note
 
-imf_buf:     times IMF_BUFSIZE db 0   ; music data buffer
+    ; advance pointer by 4
+    add  word [imf_ptr], 4
+
+    ; write reg to OPL2 (port 388h = index, 389h = data)
+    ; guard: skip reg=0, val=0, delay=0 no-op records (but still advance)
+    ; actually we always write so init records take effect
+    push dx
+    mov  dx, 0388h
+    out  dx, al         ; write register index
+    ; short delay for OPL2 address latch (~3.3 microseconds, 6 I/O reads suffices)
+    in   al, dx
+    in   al, dx
+    in   al, dx
+    in   al, dx
+    in   al, dx
+    in   al, dx
+    mov  dx, 0389h
+    mov  al, ah         ; write value
+    out  dx, al
+    ; short delay for OPL2 data latch (~23 us, 35 I/O reads)
+    mov  dx, 0388h
+    mov  cx, 35
+.ip_dly:
+    in   al, dx
+    loop .ip_dly
+    pop  dx
+
+    ; bx = record's delay.  If 0 -> fetch next record immediately.
+    or   bx, bx
+    jnz  .ip_havedealy
+
+    ; zero-delay: just keep looping
+    jmp  .ip_loop
+
+.ip_havedealy:
+    ; subtract this record's delay from our accumulated imf_delay
+    ; load into register so signed jle works correctly
+    mov  ax, [imf_delay]
+    sub  ax, bx
+    mov  [imf_delay], ax
+    ; if result <= 0, all ticks consumed -> stop
+    jle  .ip_exhausted
+    jmp  .ip_loop       ; still ticks left -> fetch next record
+
+.ip_exhausted:
+    ; clamp imf_delay to 0
+    mov  word [imf_delay], 0
+    pop  si
+    ret
+
+; ---------------------------------------------------------------------------
+; imf_stop  -  silence all 9 OPL2 voice channels (key-off all)
+; ---------------------------------------------------------------------------
+imf_stop:
+    push ax
+    push bx
+    push cx
+    push dx
+    push ds
+    push cs
+    pop  ds
+
+    ; zero imf_size so imf_tick becomes a no-op
+    mov  word [imf_size], 0
+
+    ; key-off all 9 channels: write 0 to B0h..B8h (key-on bit = bit 5)
+    mov  cx, 9
+    mov  bx, 0B0h       ; first key-on register
+.is_ch:
+    mov  dx, 0388h
+    mov  al, bl
+    out  dx, al
+    in   al, dx
+    in   al, dx
+    in   al, dx
+    in   al, dx
+    in   al, dx
+    in   al, dx
+    mov  dx, 0389h
+    xor  al, al         ; key-off, freq = 0
+    out  dx, al
+    inc  bx
+    loop .is_ch
+
+    pop  ds
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
 
 
 file_welcome:     db 'WELCOME.BMP', 0
-file_imf_welcome: db 'WELCOME.IMF', 0
-file_imf_1p:      db '1PMUSIC.IMF', 0
-file_imf_2p:      db '2PMUSIC.IMF', 0
-file_imf_end:     db 'END.IMF', 0
 file_gamemode:    db 'GAMEMOD.BMP', 0
 file_2p_p1ready:  db 'P1READY.BMP', 0
 file_2p_p2ready:  db 'P2READY.BMP', 0
@@ -2676,6 +2817,27 @@ lb_tmp_name: times 11  db 0          ; temp name buffer (10 + null)
 lb_tmp_score: dw 0                   ; temp score
 lb_tmp_diff:  db 0                   ; temp difficulty
 lb_col_x:     dw 0                   ; current column x for drawing
+
+; ---------------------------------------------------------------------------
+; IMF player state variables
+; ---------------------------------------------------------------------------
+imf_handle:       dw 0         ; DOS file handle (used during load only)
+imf_size:         dw 0         ; bytes loaded into imf_buf (0 = no music)
+imf_ptr:          dw imf_buf   ; current read pointer into imf_buf
+imf_delay:        dw 0         ; remaining IMF ticks before next record
+imf_frac:         dw 0         ; fractional tick accumulator
+imf_lasttick_lo:  dw 0         ; low word of last BIOS tick snapshot
+imf_lasttick_hi:  dw 0         ; high word of last BIOS tick snapshot
+
+; IMF filenames
+file_imf_welcome: db 'WELCOME.IMF', 0
+file_imf_end:     db 'END.IMF', 0
+
+; IMF buffer size (must hold largest file: WELCOME.IMF)
+IMF_BUFSZ equ 20000
+
+; IMF data buffer (placed last so it does not fragment earlier data)
+imf_buf:          times IMF_BUFSZ db 0
 
 ; =============================================================================
 ; 8x8 BITMAP FONT  ASCII 32-127  (96 glyphs x 8 bytes)
